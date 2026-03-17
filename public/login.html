@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Вход / выход — СУРВ</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="style.css">
+  <script src="/js/face-api.min.js"></script>
+  <script defer src="login.js"></script>
+</head>
+<body>
+<div class="container">
+  <a href="index.html" class="small">&larr; На главную</a>
+  <h1>Вход / выход</h1>
+  <p class="subtitle">Биометрия по лицу + проверка живости и GPS.</p>
+
+  <div class="layout-two-columns">
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title">Камера</div>
+        <span id="cameraStatus" class="tag">камера: нет</span>
+      </div>
+      <div class="video-wrapper">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="overlay"></canvas>
+      </div>
+      <div class="tags-row">
+        <span id="modelsStatus" class="tag">модели: загружаются…</span>
+        <span id="faceStatus" class="tag">лицо: нет</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title">GPS и действие</div>
+      </div>
+      <div class="form-row">
+        <label>Текущее местоположение</label>
+        <div class="tags-row">
+          <span id="gpsStatus" class="tag">GPS: ожидание…</span>
+        </div>
+        <p class="small" id="gpsCoords"></p>
+      </div>
+
+      <div class="form-row">
+        <label>Режим</label>
+        <select id="mode">
+          <option value="login">Вход (начало смены)</option>
+          <option value="logout">Выход (конец смены)</option>
+        </select>
+      </div>
+
+      <button class="btn" id="btnAction" disabled>Выполнить</button>
+      <div id="status" class="status info" style="display:none;"></div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
+

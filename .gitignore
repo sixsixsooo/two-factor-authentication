@@ -1,0 +1,4 @@
+node_modules/
+surv.db
+nul
+*.log

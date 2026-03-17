@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Логи — СУРВ</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="style.css">
+  <script defer src="logs-view.js"></script>
+</head>
+<body>
+<div class="container">
+  <h1>Логи системы</h1>
+  <p class="subtitle">Последние события безопасности и ошибок.</p>
+
+  <div class="panel logs-table">
+    <table>
+      <thead>
+      <tr>
+        <th>Время</th>
+        <th>Тип</th>
+        <th>Сообщение</th>
+      </tr>
+      </thead>
+      <tbody id="logsBody"></tbody>
+    </table>
+  </div>
+</div>
+</body>
+</html>
+

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>СУРВ — система учета рабочего времени</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="container">
+  <h1>СУРВ</h1>
+  <p class="subtitle">Система учета рабочего времени сотрудников</p>
+
+  <div id="loggedInHint" class="panel" style="display: none;">
+    <p class="small">Вы вошли в систему. <a href="dashboard.html">Перейти в личный кабинет →</a></p>
+  </div>
+
+  <div class="cards">
+    <a class="card" href="register.html">
+      <h2>Регистрация сотрудника</h2>
+      <p>Создать профиль, сохранить биометрию лица и ставку.</p>
+    </a>
+    <a class="card" href="login.html">
+      <h2>Вход / выход</h2>
+      <p>Отметить начало и конец рабочего времени с проверкой лица и GPS.</p>
+    </a>
+  </div>
+
+  <div class="footer-links">
+    <button id="btnSalary" class="btn secondary">Скачать табель (Excel)</button>
+    <button id="btnLogs" class="btn secondary" onclick="window.open('/logs-view.html','_blank')">Логи</button>
+  </div>
+</div>
+
+<script>
+  document.getElementById('btnSalary').addEventListener('click', () => {
+    const now = new Date().toISOString();
+    window.location.href = `/salary/excel?to=${encodeURIComponent(now)}`;
+  });
+  if (localStorage.getItem('surv_employee_id')) {
+    document.getElementById('loggedInHint').style.display = 'block';
+  }
+</script>
+</body>
+</html>
+

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Личный кабинет — СУРВ</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="container">
+  <div class="dashboard-header">
+    <h1>Личный кабинет</h1>
+    <p class="subtitle" id="userName"></p>
+    <a href="index.html" class="small">← На главную</a>
+  </div>
+
+  <div id="currentSessionBlock" class="panel session-panel" style="display: none;">
+    <div class="panel-header">
+      <span class="panel-title">Учёт времени идёт</span>
+      <span class="tag ok">смена активна</span>
+    </div>
+    <p class="small">Смена начата: <strong id="sessionStart"></strong></p>
+    <div class="session-stats">
+      <div class="stat">
+        <span id="currentElapsed" class="stat-value stat-elapsed">0 ч 0 мин 0 сек</span>
+        <span class="stat-label">время в смене</span>
+      </div>
+      <div class="stat">
+        <span id="currentHours" class="stat-value">0</span>
+        <span class="stat-label">часов (для расчёта)</span>
+      </div>
+      <div class="stat">
+        <span id="currentSalary" class="stat-value">0</span>
+        <span class="stat-label">₽ за эту смену</span>
+      </div>
+    </div>
+    <button id="btnStopSession" class="btn btn-stop">Завершить смену</button>
+  </div>
+
+  <div id="noSessionHint" class="panel" style="display: none;">
+    <p class="small">Нет активной смены. <a href="login.html">Начать смену (вход)</a></p>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title">Финансы и расчёт</span>
+    </div>
+    <p class="small">Ставка: <strong id="rateValue"></strong> ₽/час</p>
+    <div class="session-stats">
+      <div class="stat">
+        <span id="sessionsCount" class="stat-value">0</span>
+        <span class="stat-label">рабочих смен</span>
+      </div>
+      <div class="stat">
+        <span id="totalHours" class="stat-value">0</span>
+        <span class="stat-label">всего часов (все смены)</span>
+      </div>
+      <div class="stat">
+        <span id="totalSalary" class="stat-value">0</span>
+        <span class="stat-label">₽ всего начислено</span>
+      </div>
+    </div>
+    <p class="small formula">Расчёт: часы × ставка = зарплата (часы округляются вниз до целого).</p>
+  </div>
+</div>
+
+<script src="dashboard.js"></script>
+</body>
+</html>

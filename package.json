@@ -1,0 +1,22 @@
+{
+  "name": "surv-time-tracking",
+  "version": "1.0.0",
+  "description": "Система учета рабочего времени сотрудников (СУРВ) с биометрией по лицу",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "exceljs": "^4.4.0",
+    "express": "^4.19.0",
+    "helmet": "^7.0.0",
+    "morgan": "^1.10.0",
+    "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "face-api.js": "^0.22.2",
+    "nodemon": "^3.1.0"
+  }
+}
