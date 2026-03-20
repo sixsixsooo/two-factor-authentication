@@ -16,7 +16,9 @@
     "sqlite3": "^5.1.7"
   },
   "devDependencies": {
-    "face-api.js": "^0.22.2",
+    "@tensorflow-models/knn-classifier": "^1.2.6",
+    "@tensorflow-models/mobilenet": "^2.1.1",
+    "@tensorflow/tfjs": "^4.20.0",
     "nodemon": "^3.1.0"
   }
 }

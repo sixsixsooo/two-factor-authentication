@@ -1,3 +1,23 @@
+.diag-pre {
+  max-height: 220px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.35;
+  background: #020617;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 10px;
+  margin-top: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #cbd5e1;
+}
+
+.diag-details summary {
+  cursor: pointer;
+  color: #93c5fd;
+}
+
 .container {
   max-width: 960px;
   margin: 0 auto;

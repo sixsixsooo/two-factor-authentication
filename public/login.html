@@ -2,59 +2,82 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>Вход / выход — СУРВ</title>
+  <title>Вход — СУРВ</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="style.css">
-  <script src="/js/face-api.min.js"></script>
-  <script defer src="login.js"></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js" onerror="window.__SURV_CDN_ERR='tf'"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js" onerror="window.__SURV_CDN_ERR='mobilenet'"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/knn-classifier@1.2.6/dist/knn-classifier.min.js" onerror="window.__SURV_CDN_ERR='knn'"></script>
+
+  <script defer src="local-db.js"></script>
+  <script defer src="login.js?v=9"></script>
 </head>
 <body>
 <div class="container">
   <a href="index.html" class="small">&larr; На главную</a>
-  <h1>Вход / выход</h1>
-  <p class="subtitle">Биометрия по лицу + проверка живости и GPS.</p>
+  <h1>Вход</h1>
+  <p class="subtitle">Введите employeeId — проверка в <strong>локальной IndexedDB</strong>, затем лицо (KNN) и GPS.</p>
+  <p class="small">Нет профиля? <a href="register.html">Регистрация сотрудника и обучение лица</a></p>
+  <p class="small">Сотрудники и лица хранятся только в браузере на этом ПК. Используйте тот же браузер, что и при регистрации. Адрес: <code>http://localhost:3000</code>.</p>
 
   <div class="layout-two-columns">
     <div class="panel">
       <div class="panel-header">
-        <div class="panel-title">Камера</div>
-        <span id="cameraStatus" class="tag">камера: нет</span>
+        <div class="panel-title">Идентификация</div>
+        <span id="modelsStatus" class="tag">модели: ожидание…</span>
       </div>
-      <div class="video-wrapper">
-        <video id="video" autoplay muted playsinline></video>
-        <canvas id="overlay"></canvas>
+
+      <div class="form-row">
+        <label for="employeeIdInput">employeeId</label>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+          <input id="employeeIdInput" type="number" min="1" placeholder="Например: 1" style="flex: 1; min-width: 120px;">
+          <button type="button" class="btn secondary" id="btnCheckEmployee">Проверить локально</button>
+        </div>
       </div>
-      <div class="tags-row">
-        <span id="modelsStatus" class="tag">модели: загружаются…</span>
-        <span id="faceStatus" class="tag">лицо: нет</span>
+      <p id="employeeInfo" class="small" style="min-height: 1.5em; color: #93c5fd;"></p>
+
+      <div id="faceBlock" style="opacity: 0.5; pointer-events: none;">
+        <div class="video-wrapper" style="margin-top: 12px;">
+          <video id="webcam" autoplay muted playsinline></video>
+        </div>
+        <div class="tags-row" style="margin-top: 8px;">
+          <span id="datasetStatus" class="tag">база: —</span>
+          <span id="predictionStatus" class="tag bad">лицо: ожидание…</span>
+        </div>
       </div>
+
+      <div id="statusBox" class="status info" style="display:none; margin-top: 10px;"></div>
+
+      <details class="diag-details" style="margin-top: 14px;">
+        <summary>Журнал отладки</summary>
+        <pre id="diagLog" class="diag-pre"></pre>
+        <button type="button" class="btn secondary" id="btnCopyDiag" style="margin-top: 8px;">Копировать лог</button>
+        <p class="small">Откройте через <strong>http://localhost:3000/login.html</strong> (не file://).</p>
+      </details>
     </div>
 
     <div class="panel">
       <div class="panel-header">
-        <div class="panel-title">GPS и действие</div>
+        <div class="panel-title">Местоположение и вход</div>
       </div>
+
       <div class="form-row">
         <label>Текущее местоположение</label>
-        <div class="tags-row">
+        <div class="tags-row" style="flex-wrap: wrap; gap: 8px;">
           <span id="gpsStatus" class="tag">GPS: ожидание…</span>
+          <button type="button" class="btn secondary" id="btnRetryGps" style="padding: 6px 12px; font-size: 0.85rem;">Повторить GPS</button>
         </div>
         <p class="small" id="gpsCoords"></p>
       </div>
 
-      <div class="form-row">
-        <label>Режим</label>
-        <select id="mode">
-          <option value="login">Вход (начало смены)</option>
-          <option value="logout">Выход (конец смены)</option>
-        </select>
-      </div>
-
-      <button class="btn" id="btnAction" disabled>Выполнить</button>
-      <div id="status" class="status info" style="display:none;"></div>
+      <button class="btn" id="btnLogin" disabled>Войти</button>
+      <p class="small" id="loginHint" style="margin-top: 10px; color: #9ca3af;">
+        Сначала «Проверить локально», затем смотрите в камеру и дождитесь «лицо: совпало», затем «Войти».
+      </p>
+      <div id="statusAction" class="status info" style="display:none;"></div>
     </div>
   </div>
 </div>
 </body>
 </html>
-

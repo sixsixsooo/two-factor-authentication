@@ -1,15 +1,21 @@
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 
-const dbPath = path.join(__dirname, 'surv.db');
+// Одна база на все экземпляры: можно задать общий путь (иначе у каждой копии папки — свой surv.db)
+const dbPath = process.env.SURV_DB_PATH
+  ? path.resolve(process.env.SURV_DB_PATH)
+  : path.join(__dirname, 'surv.db');
 const db = new sqlite3.Database(dbPath);
+
+// В консоли сервера видно, какой файл реально используется (важно при нескольких копиях проекта)
+console.log('[SURV DB] SQLite файл:', dbPath);
 
 db.serialize(() => {
   db.run(`
     CREATE TABLE IF NOT EXISTS employees (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
-      face_descriptor TEXT NOT NULL,
+      face_descriptor TEXT,
       rate REAL NOT NULL,
       schedule TEXT NOT NULL
     )
@@ -35,6 +41,19 @@ db.serialize(() => {
       timestamp TEXT NOT NULL
     )
   `);
+
+  // Единая база признаков KNN (JSON: { "1": { shape, values }, ... })
+  db.run(`
+    CREATE TABLE IF NOT EXISTS knn_dataset (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      payload TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+
+  db.run('PRAGMA journal_mode = WAL', (err) => {
+    if (err) console.error('[SURV DB] PRAGMA journal_mode:', err.message);
+  });
 });
 
 function logEvent(type, message) {
@@ -47,6 +66,7 @@ function logEvent(type, message) {
 
 module.exports = {
   db,
+  dbPath,
   logEvent
 };
 

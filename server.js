@@ -4,25 +4,48 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const path = require('path');
 const ExcelJS = require('exceljs');
-const { db, logEvent } = require('./db');
+const { db, dbPath, logEvent } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Метка версии (в консоли видно, что запущен сервер без лимитов)
-const SERVER_VERSION = 'SURV v2 (лимиты отключены)';
+const SERVER_VERSION = 'SURV v3 (БД: проверка INSERT + /api/status с dbPath)';
 
 // Координаты офиса
-const OFFICE_LAT = 47.212;
-const OFFICE_LON = 38.9087;
+const OFFICE_LAT = 47.213702;
+const OFFICE_LON = 38.851113;
 const MAX_DISTANCE_METERS = 50;
 
 // Лимиты на попытки входа отключены (не используются).
 
-app.use(helmet());
+// CSP отключён: TensorFlow.js тянет веса с разных хостов + wasm/web workers; строгий CSP ломает загрузку.
+// Cross-Origin-Resource-Policy: same-origin у Helmet по умолчанию иногда мешает сторонним скриптам/ресурсам.
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: false
+  })
+);
 app.use(cors());
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '12mb' }));
 app.use(morgan('dev'));
+
+// Не кэшировать API и формы — иначе браузер может отдать старый 404 для GET /api/employee/:id
+app.use((req, res, next) => {
+  const p = req.path || '';
+  if (
+    p.startsWith('/api') ||
+    p === '/register' ||
+    p === '/login' ||
+    p === '/logout' ||
+    p === '/logs'
+  ) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('Pragma', 'no-cache');
+  }
+  next();
+});
 
 // Ответы API не кэшировать (чтобы не показывался старый 429)
 app.use('/login', (req, res, next) => {
@@ -30,19 +53,104 @@ app.use('/login', (req, res, next) => {
   next();
 });
 
-// Веса face-api: отдавать shard-файлы без расширения как binary
-app.use('/weights', (req, res, next) => {
-  if (!req.path.endsWith('.json') && req.path.length > 0) {
-    res.setHeader('Content-Type', 'application/octet-stream');
-  }
-  next();
-}, express.static(path.join(__dirname, 'public', 'weights')));
-
-app.use(express.static(path.join(__dirname, 'public')));
-
+// Статику подключаем ПОСЛЕ API — иначе запросы вида GET /api/employee/7 могут некорректно обрабатываться
 // Проверка: если видишь rateLimit: false — запущена актуальная версия без лимитов
 app.get('/api/status', (req, res) => {
-  res.json({ rateLimit: false, ok: true });
+  db.get('SELECT COUNT(*) AS c FROM employees', [], (err, row) => {
+    const count = err ? -1 : Number(row && row.c);
+    res.json({
+      ok: true,
+      rateLimit: false,
+      version: SERVER_VERSION,
+      dbPath,
+      employeeCount: count,
+      dbError: err ? err.message : null,
+      hint: 'Если employeeCount не растёт после регистрации — смотрите dbPath (один файл на весь сервер).'
+    });
+  });
+});
+
+// Короткий алиас: список сотрудников (тот же ответ, что /api/debug/employees)
+app.get('/api/employees', (req, res) => {
+  db.all('SELECT id, name, rate, schedule FROM employees ORDER BY id', [], (err, rows) => {
+    if (err) {
+      console.error('[SURV] GET /api/employees:', err.message);
+      return res.status(500).json({ error: err.message });
+    }
+    res.json({
+      dbPath,
+      count: rows ? rows.length : 0,
+      employees: rows || []
+    });
+  });
+});
+
+// Логи с клиента (браузер) — смотрите консоль сервера и таблицу logs
+app.post('/api/client-log', (req, res) => {
+  try {
+    const body = req.body || {};
+    const line =
+      typeof body.line === 'string'
+        ? body.line
+        : typeof body.message === 'string'
+          ? body.message
+          : JSON.stringify(body).slice(0, 2000);
+    const ua = req.headers['user-agent'] || '';
+    const msg = `[client] ${line} | ua=${ua.slice(0, 120)}`;
+    console.log(msg);
+    logEvent('info', msg.slice(0, 900));
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false });
+  }
+});
+
+// База признаков KNN (JSON) — хранится в SQLite, подгружается на странице входа
+app.get('/api/knn-dataset', (req, res) => {
+  db.get('SELECT payload, updated_at FROM knn_dataset WHERE id = 1', [], (err, row) => {
+    if (err) {
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+    if (!row || !row.payload) {
+      return res.json({ dataset: null, updatedAt: null });
+    }
+    try {
+      const dataset = JSON.parse(row.payload);
+      res.json({ dataset, updatedAt: row.updated_at });
+    } catch (e) {
+      res.status(500).json({ error: 'Ошибка данных в knn_dataset' });
+    }
+  });
+});
+
+app.post('/api/knn-dataset', (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== 'object') {
+    return res.status(400).json({ error: 'Нет JSON' });
+  }
+  let payload = body.dataset;
+  if (payload === undefined) {
+    payload = body;
+  }
+  if (!payload || typeof payload !== 'object') {
+    return res.status(400).json({ error: 'Нет поля dataset' });
+  }
+  const json = JSON.stringify(payload);
+  const now = new Date().toISOString();
+  db.run(
+    'INSERT OR REPLACE INTO knn_dataset (id, payload, updated_at) VALUES (1, ?, ?)',
+    [json, now],
+    function (err) {
+      if (err) {
+        console.error('[SURV] POST /api/knn-dataset error:', err.message);
+        logEvent('error', `knn_dataset save: ${err.message}`);
+        return res.status(500).json({ error: 'Ошибка сохранения' });
+      }
+      console.log('[SURV] POST /api/knn-dataset OK, размер JSON ~' + json.length + ' байт');
+      logEvent('info', 'knn_dataset обновлён');
+      res.json({ success: true, updatedAt: now });
+    }
+  );
 });
 
 // Текущая активная смена сотрудника (для главной страницы)
@@ -138,45 +246,93 @@ function haversineDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-function euclideanDistance(desc1, desc2) {
-  if (desc1.length !== desc2.length) return Infinity;
-  let sum = 0;
-  for (let i = 0; i < desc1.length; i++) {
-    const diff = desc1[i] - desc2[i];
-    sum += diff * diff;
-  }
-  return Math.sqrt(sum);
-}
-
 // Простая сессионная модель (в памяти)
 const activeSessions = new Map(); // employeeId -> sessionId
 
+// Проверка, что сотрудник есть в БД (для страницы входа)
+app.get('/api/employee/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id || Number.isNaN(id)) {
+    return res.status(400).json({ error: 'Неверный employeeId' });
+  }
+  db.get('SELECT id, name FROM employees WHERE id = ?', [id], (err, row) => {
+    if (err) {
+      console.error('[SURV] GET /api/employee/' + id + ' DB error:', err.message);
+      logEvent('error', `GET /api/employee: ${err.message}`);
+      return res.status(500).json({ error: 'Ошибка сервера' });
+    }
+    if (!row) {
+      console.log('[SURV] GET /api/employee/' + id + ' → не найден (в БД нет строки)');
+      return res.status(404).json({ exists: false, error: 'Сотрудник не найден' });
+    }
+    console.log('[SURV] GET /api/employee/' + id + ' → OK, имя:', row.name);
+    res.json({ exists: true, id: row.id, name: row.name });
+  });
+});
+
+// Диагностика: список сотрудников в текущем surv.db (для отладки «не вижу в базе»)
+app.get('/api/debug/employees', (req, res) => {
+  db.all('SELECT id, name, rate, schedule FROM employees ORDER BY id', [], (err, rows) => {
+    if (err) {
+      console.error('[SURV] debug/employees:', err.message);
+      return res.status(500).json({ error: err.message });
+    }
+    res.json({
+      dbPath,
+      dbHint: 'Тот же путь, что в консоли при старте и в GET /api/status',
+      count: rows ? rows.length : 0,
+      employees: rows || []
+    });
+  });
+});
+
 app.post('/register', (req, res) => {
-  const { name, schedule, rate, faceDescriptor } = req.body;
-  if (!name || !schedule || !rate || !faceDescriptor) {
+  const body = req.body || {};
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  const schedule = body.schedule;
+  const rateNum = body.rate === undefined || body.rate === null ? NaN : Number(body.rate);
+
+  if (!name || !schedule || Number.isNaN(rateNum) || rateNum < 0) {
+    console.log('[SURV] POST /register отклонён: невалидные поля', {
+      hasName: !!name,
+      schedule,
+      rateNum
+    });
     return res.status(400).json({ error: 'Не все поля заполнены' });
   }
 
-  const descriptorString = JSON.stringify(faceDescriptor);
-
   db.run(
     'INSERT INTO employees (name, face_descriptor, rate, schedule) VALUES (?, ?, ?, ?)',
-    [name, descriptorString, rate, schedule],
+    [name, '[]', rateNum, String(schedule)],
     function (err) {
       if (err) {
+        console.error('[SURV] POST /register INSERT error:', err.message);
         logEvent('error', `Register error: ${err.message}`);
         return res.status(500).json({ error: 'Ошибка сервера' });
       }
-      logEvent('info', `Registered employee ${name} (id=${this.lastID})`);
-      res.json({ success: true, employeeId: this.lastID });
+      const newId = this.lastID;
+      // Сразу читаем строку из того же файла — если SELECT пустой, клиенту не отдаём «успех»
+      db.get('SELECT id, name, rate, schedule FROM employees WHERE id = ?', [newId], (err2, row) => {
+        if (err2) {
+          console.error('[SURV] POST /register VERIFY error:', err2.message);
+          return res.status(500).json({ error: 'Запись не подтверждена в БД' });
+        }
+        if (!row) {
+          console.error('[SURV] POST /register VERIFY: строка id=' + newId + ' не найдена после INSERT');
+          return res.status(500).json({ error: 'Сотрудник не сохранился в SQLite (проверьте dbPath в /api/status)' });
+        }
+        console.log('[SURV] POST /register OK + VERIFY → employeeId=' + newId + ', имя=' + row.name);
+        logEvent('info', `Registered employee ${name} (id=${newId})`);
+        res.json({ success: true, employeeId: newId, name: row.name, dbPath });
+      });
     }
   );
 });
 
 app.post('/login', (req, res) => {
-  const { faceDescriptor, latitude, longitude } = req.body;
-  if (!faceDescriptor || typeof latitude !== 'number' || typeof longitude !== 'number') {
-    return res.status(400).json({ error: 'Нет данных лица или GPS' });
+  const { employeeId, latitude, longitude } = req.body;
+  if (!employeeId || typeof latitude !== 'number' || typeof longitude !== 'number') {
+    return res.status(400).json({ error: 'Нет employeeId или GPS' });
   }
 
   const distance = haversineDistance(latitude, longitude, OFFICE_LAT, OFFICE_LON);
@@ -185,74 +341,53 @@ app.post('/login', (req, res) => {
     return res.status(403).json({ error: 'Вы слишком далеко от офиса' });
   }
 
-  db.all('SELECT * FROM employees', [], (err, rows) => {
-    if (err) {
-      logEvent('error', `DB error on login: ${err.message}`);
-      return res.status(500).json({ error: 'Ошибка сервера' });
-    }
-
-    if (!rows || rows.length === 0) {
-      return res.status(404).json({ error: 'Нет зарегистрированных сотрудников' });
-    }
-
-    const inputDesc = faceDescriptor;
-    let bestMatch = null;
-    let bestDistance = Infinity;
-
-    for (const row of rows) {
-      let storedDesc;
-      try {
-        storedDesc = JSON.parse(row.face_descriptor);
-      } catch (e) {
-        continue;
+  db.get(
+    'SELECT id, name FROM employees WHERE id = ?',
+    [employeeId],
+    (err, emp) => {
+      if (err) {
+        logEvent('error', `DB error on login: ${err.message}`);
+        return res.status(500).json({ error: 'Ошибка сервера' });
       }
-      const dist = euclideanDistance(inputDesc, storedDesc);
-      if (dist < bestDistance) {
-        bestDistance = dist;
-        bestMatch = row;
+      if (!emp) {
+        return res.status(404).json({ error: 'Сотрудник не найден' });
       }
-    }
 
-    if (!bestMatch || bestDistance > 0.6) {
-      logEvent('security', `Face not recognized, minDist=${bestDistance}`);
-      return res.status(401).json({ error: 'Лицо не распознано' });
-    }
+      const now = new Date().toISOString();
 
-    const employeeId = bestMatch.id;
-    const now = new Date().toISOString();
-
-    const existingSessionId = activeSessions.get(employeeId);
-    if (existingSessionId) {
-      db.get(
-        'SELECT * FROM sessions WHERE id = ?',
-        [existingSessionId],
-        (err2, sessionRow) => {
-          if (err2 || !sessionRow || sessionRow.end_time) {
-            activeSessions.delete(employeeId);
+      const existingSessionId = activeSessions.get(employeeId);
+      if (existingSessionId) {
+        db.get(
+          'SELECT * FROM sessions WHERE id = ?',
+          [existingSessionId],
+          (err2, sessionRow) => {
+            if (err2 || !sessionRow || sessionRow.end_time) {
+              activeSessions.delete(employeeId);
+            }
           }
+        );
+      }
+
+      db.run(
+        'INSERT INTO sessions (employee_id, start_time, latitude, longitude) VALUES (?, ?, ?, ?)',
+        [employeeId, now, latitude, longitude],
+        function (err3) {
+          if (err3) {
+            logEvent('error', `Error creating session: ${err3.message}`);
+            return res.status(500).json({ error: 'Ошибка сервера' });
+          }
+          activeSessions.set(employeeId, this.lastID);
+          logEvent('info', `Login employee ${employeeId}, session ${this.lastID}`);
+          res.json({
+            success: true,
+            employeeId: emp.id,
+            sessionId: this.lastID,
+            name: emp.name
+          });
         }
       );
     }
-
-    db.run(
-      'INSERT INTO sessions (employee_id, start_time, latitude, longitude) VALUES (?, ?, ?, ?)',
-      [employeeId, now, latitude, longitude],
-      function (err3) {
-        if (err3) {
-          logEvent('error', `Error creating session: ${err3.message}`);
-          return res.status(500).json({ error: 'Ошибка сервера' });
-        }
-        activeSessions.set(employeeId, this.lastID);
-        logEvent('info', `Login employee ${employeeId}, session ${this.lastID}`);
-        res.json({
-          success: true,
-          employeeId,
-          sessionId: this.lastID,
-          name: bestMatch.name
-        });
-      }
-    );
-  });
+  );
 });
 
 app.post('/logout', (req, res) => {
@@ -426,8 +561,11 @@ app.get('/logs', (req, res) => {
   );
 });
 
+app.use(express.static(path.join(__dirname, 'public')));
+
 app.listen(PORT, () => {
   console.log(`${SERVER_VERSION}`);
   console.log(`Сервер запущен на http://localhost:${PORT}`);
+  console.log('[SURV] Диагностика БД: GET http://localhost:' + PORT + '/api/debug/employees');
 });
 

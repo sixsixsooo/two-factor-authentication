@@ -1,220 +1,607 @@
-const video = document.getElementById('video');
-const overlay = document.getElementById('overlay');
-const cameraStatus = document.getElementById('cameraStatus');
+/* global tf, mobilenet, knnClassifier, SurvLocalDB */
+
+const diagLines = [];
+const MAX_DIAG = 80;
+
+function diagLog(msg, err) {
+  try {
+    const extra = err ? (err.stack || err.message || String(err)) : '';
+    const line = new Date().toISOString() + ' ' + msg + (extra ? ' | ' + extra : '');
+    diagLines.push(line);
+    if (diagLines.length > MAX_DIAG) diagLines.shift();
+    console.log('[SURV]', line);
+    const el = document.getElementById('diagLog');
+    if (el) el.textContent = diagLines.slice(-40).join('\n');
+  } catch (_) {}
+}
+
+const webcam = document.getElementById('webcam');
 const modelsStatus = document.getElementById('modelsStatus');
-const faceStatus = document.getElementById('faceStatus');
+const datasetStatus = document.getElementById('datasetStatus');
+const predictionStatus = document.getElementById('predictionStatus');
+const faceBlock = document.getElementById('faceBlock');
+
+const employeeIdInput = document.getElementById('employeeIdInput');
+const btnCheckEmployee = document.getElementById('btnCheckEmployee');
+const employeeInfo = document.getElementById('employeeInfo');
+
+const statusBox = document.getElementById('statusBox');
 const gpsStatus = document.getElementById('gpsStatus');
 const gpsCoords = document.getElementById('gpsCoords');
-const statusBox = document.getElementById('status');
-const btnAction = document.getElementById('btnAction');
-const modeSelect = document.getElementById('mode');
+const btnRetryGps = document.getElementById('btnRetryGps');
+const btnLogin = document.getElementById('btnLogin');
+const statusAction = document.getElementById('statusAction');
 
-let modelsLoaded = false;
-let stream = null;
-let lastDescriptor = null;
+/**
+ * Распознавание не по «уверенности KNN» (при 1 классе она всегда ~1 для любого лица),
+ * а по косинусной близости текущего кадра к среднему эмбеддингу класса.
+ */
+const COSINE_MIN_SAME_PERSON = 0.84;
+/** Если в базе несколько сотрудников — отрыв лучшего от второго (меньше путаницы «чужой как вы»). */
+const MARGIN_MIN_DIFFERENT_CLASSES = 0.05;
+/** Подряд кадров с хорошим совпадением, чтобы снизить случайные совпадения. */
+const STABLE_FRAMES_NEEDED = 10;
+
+let net = null;
+let classifier = null;
+/** label -> L2-нормированный средний вектор признаков */
+let classMeanEmbeddings = null;
+let stableMatchFrames = 0;
+/** Последняя cos-схожесть с ожидаемым employeeId (для подсказки в UI) */
+let lastCosineToExpected = 0;
+
+/** После успешной проверки сотрудника в IndexedDB */
+let employeeVerified = false;
+let expectedEmployeeIdStr = null;
+let verifiedEmployeeName = '';
+
+let recognizedEmployeeId = null;
+let recognizedConfidence = 0;
+
+let isPredicting = false;
+let isTraining = false;
+let facePipelineStarted = false;
+let facePipelinePromise = null;
+
 let gps = { lat: null, lon: null };
 
-function setStatus(el, text, type) {
+function setBox(el, text, kind) {
+  if (!el) return;
+  el.style.display = 'block';
+  el.className = 'status ' + (kind || 'info');
   el.textContent = text;
-  el.classList.remove('ok', 'bad');
-  if (type === 'ok') el.classList.add('ok');
-  if (type === 'bad') el.classList.add('bad');
 }
 
-function maybeEnableAction() {
-  const isLogout = modeSelect.value === 'logout';
-  if (isLogout) {
-    btnAction.disabled = false;
-  } else {
-    btnAction.disabled = !(modelsLoaded && gps.lat !== null && lastDescriptor);
-  }
-}
-
-async function loadModels() {
-  if (typeof faceapi === 'undefined') {
-    setStatus(modelsStatus, 'ошибка: библиотека не загружена', 'bad');
+function setStatusText() {
+  if (!employeeVerified || !expectedEmployeeIdStr) {
+    predictionStatus.textContent = 'лицо: сначала проверьте employeeId';
+    predictionStatus.className = 'tag bad';
     return;
   }
-  const MODEL_URL = window.location.origin + '/weights';
+  if (!classMeanEmbeddings || !classMeanEmbeddings[expectedEmployeeIdStr]) {
+    predictionStatus.textContent = 'лицо: нет эталона для id ' + expectedEmployeeIdStr;
+    predictionStatus.className = 'tag bad';
+    return;
+  }
+  if (!recognizedEmployeeId) {
+    predictionStatus.textContent =
+      'лицо: cos к вашему эталону = ' +
+      lastCosineToExpected.toFixed(2) +
+      ' (нужно ≥ ' +
+      COSINE_MIN_SAME_PERSON +
+      ', подряд ~' +
+      STABLE_FRAMES_NEEDED +
+      ' кадров)';
+    predictionStatus.className = 'tag bad';
+    return;
+  }
+  predictionStatus.textContent =
+    'лицо: совпало (id ' +
+    recognizedEmployeeId +
+    ', cos=' +
+    recognizedConfidence.toFixed(2) +
+    ')';
+  predictionStatus.className = recognizedConfidence >= COSINE_MIN_SAME_PERSON ? 'tag ok' : 'tag bad';
+}
+
+function updateDatasetStatus() {
   try {
-    setStatus(modelsStatus, 'модели: загрузка…', null);
-    await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-    await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
-    await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
-    modelsLoaded = true;
-    setStatus(modelsStatus, 'модели: загружены', 'ok');
-    maybeEnableAction();
-  } catch (e) {
-    const msg = (e && (e.message || e.toString())) || 'Неизвестная ошибка';
-    setStatus(modelsStatus, 'ошибка загрузки моделей', 'bad');
-    console.error('loadModels error:', e);
-    if (statusBox) {
-      statusBox.style.display = 'block';
-      statusBox.className = 'status error';
-      statusBox.textContent = 'Модели: ' + msg;
+    if (!classifier) {
+      datasetStatus.textContent = 'база: —';
+      return;
     }
-  }
-}
-
-async function startCamera() {
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-    video.srcObject = stream;
-    setStatus(cameraStatus, 'камера: ок', 'ok');
+    const numExamples = classifier.getNumExamples();
+    datasetStatus.textContent = 'база: ' + (numExamples > 0 ? 'есть данные (' + numExamples + ')' : 'пусто (обучите на странице регистрации)');
   } catch (e) {
-    setStatus(cameraStatus, 'камера: ошибка', 'bad');
-    console.error(e);
+    datasetStatus.textContent = 'база: ?';
   }
 }
 
-function startGps() {
+function faceMatchesExpected() {
+  return (
+    employeeVerified &&
+    expectedEmployeeIdStr &&
+    recognizedEmployeeId === expectedEmployeeIdStr &&
+    recognizedConfidence >= COSINE_MIN_SAME_PERSON
+  );
+}
+
+function maybeEnableLogin() {
+  const ok = faceMatchesExpected() && gps.lat !== null && gps.lon !== null;
+  btnLogin.disabled = !ok;
+}
+
+function geolocationErrorMessage(code) {
+  switch (code) {
+    case 1:
+      return 'доступ запрещён';
+    case 2:
+      return 'позиция недоступна';
+    case 3:
+      return 'таймаут';
+    default:
+      return 'ошибка';
+  }
+}
+
+async function startGps() {
+  diagLog('startGps()');
   if (!navigator.geolocation) {
-    setStatus(gpsStatus, 'GPS: не поддерживается', 'bad');
+    gpsStatus.textContent = 'GPS: не поддерживается';
+    gpsStatus.className = 'tag bad';
+    gpsCoords.textContent = 'Браузер не поддерживает Geolocation API.';
     return;
   }
+  gps.lat = null;
+  gps.lon = null;
+  gpsStatus.textContent = 'GPS: запрос…';
+  gpsStatus.className = 'tag';
+  gpsCoords.textContent =
+    'Разрешите доступ к местоположению. На не-localhost без HTTPS геолокация может быть недоступна.';
+
   navigator.geolocation.getCurrentPosition(
     (pos) => {
       gps.lat = pos.coords.latitude;
       gps.lon = pos.coords.longitude;
-      setStatus(gpsStatus, 'GPS: ок', 'ok');
+      gpsStatus.textContent = 'GPS: ок';
+      gpsStatus.className = 'tag ok';
       gpsCoords.textContent = `lat=${gps.lat.toFixed(6)}, lon=${gps.lon.toFixed(6)}`;
-      maybeEnableAction();
+      diagLog('GPS OK');
+      maybeEnableLogin();
     },
     (err) => {
-      console.error(err);
-      setStatus(gpsStatus, 'GPS: отказано', 'bad');
-      gpsCoords.textContent = 'Разрешите доступ к геолокации.';
+      const code = err && err.code;
+      gpsStatus.textContent = 'GPS: ' + geolocationErrorMessage(code);
+      gpsStatus.className = 'tag bad';
+      diagLog('GPS error', err);
+      maybeEnableLogin();
     },
-    { enableHighAccuracy: true, timeout: 10000 }
+    { enableHighAccuracy: false, timeout: 30000, maximumAge: 0 }
   );
 }
 
-// Более мягкие настройки детектора: ниже порог уверенности и крупнее вход — сетка лица рисуется при небольших поворотах
-const FACE_DETECTOR_OPTIONS = new faceapi.TinyFaceDetectorOptions({
-  scoreThreshold: 0.25,
-  inputSize: 512
-});
-
-async function detectLoop() {
-  const displaySize = { width: video.clientWidth, height: video.clientHeight };
-  faceapi.matchDimensions(overlay, displaySize);
-
-  setInterval(async () => {
-    if (!modelsLoaded) return;
-    if (video.readyState < 2) return;
-
-    const detections = await faceapi
-      .detectSingleFace(video, FACE_DETECTOR_OPTIONS)
-      .withFaceLandmarks()
-      .withFaceDescriptor();
-
-    const ctx = overlay.getContext('2d');
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
-
-    if (detections) {
-      const resized = faceapi.resizeResults(detections, displaySize);
-      faceapi.draw.drawDetections(overlay, resized);
-      faceapi.draw.drawFaceLandmarks(overlay, resized);
-      setStatus(faceStatus, 'лицо: найдено', 'ok');
-      lastDescriptor = Array.from(detections.descriptor);
-    } else {
-      setStatus(faceStatus, 'лицо: нет', 'bad');
-      lastDescriptor = null;
-    }
-    maybeEnableAction();
-  }, 300);
+if (btnRetryGps) {
+  btnRetryGps.addEventListener('click', () => startGps());
 }
 
-window.addEventListener('DOMContentLoaded', async () => {
-  await Promise.all([loadModels(), startCamera()]);
-  startGps();
-  detectLoop();
-});
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(label + ' (таймаут ' + ms / 1000 + ' с)')), ms)
+    )
+  ]);
+}
 
-modeSelect.addEventListener('change', () => {
-  statusBox.style.display = 'none';
-  maybeEnableAction();
-});
-
-// Формирует текст ошибки из ответа сервера; для 429 даёт подсказку
-function getLoginErrorMessage(resp, data, fallback) {
-  const code = resp.status;
-  const serverMsg = (data && data.error) ? String(data.error).trim() : '';
-  let msg = serverMsg || fallback || 'Ошибка входа';
-  if (code === 429) {
-    msg = 'Сервер вернул «слишком много попыток». Лимиты в приложении отключены. ' +
-      'Перезапустите сервер (закройте все Node и снова запустите npm start) или проверьте прокси/кэш. ' +
-      (serverMsg ? ' Ответ сервера: ' + serverMsg : '');
-  } else if (serverMsg && code !== 200) {
-    msg = msg + ' (код ' + code + ')';
+async function initTfBackend() {
+  if (!window.tf || !tf.setBackend) {
+    throw new Error('tf.js не загрузился');
   }
-  return msg;
+  const tryBackend = async (name) => {
+    await tf.setBackend(name);
+    await tf.ready();
+  };
+  const order = ['webgl', 'cpu'];
+  let lastErr = null;
+  for (const name of order) {
+    try {
+      modelsStatus.textContent = 'модели: TF ' + name + '…';
+      await withTimeout(tryBackend(name), 25000, 'Backend ' + name);
+      return;
+    } catch (e) {
+      lastErr = e;
+      diagLog('TF ' + name, e);
+    }
+  }
+  throw new Error('TensorFlow.js: ' + (lastErr && lastErr.message));
 }
 
-btnAction.addEventListener('click', async () => {
-  const mode = modeSelect.value;
-  statusBox.style.display = 'block';
-  statusBox.className = 'status info';
-  statusBox.textContent = 'Отправка...';
-  btnAction.disabled = true;
+async function setupModels() {
+  if (!mobilenet) throw new Error('MobileNet не загрузился');
+  modelsStatus.textContent = 'модели: MobileNet…';
+  net = await withTimeout(
+    mobilenet.load({ version: 2, alpha: 1.0 }),
+    120000,
+    'MobileNet'
+  );
+  modelsStatus.textContent = 'модели: готовы';
+}
+
+async function setupWebcam() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error('Камера недоступна (нужен http://localhost или HTTPS)');
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+  webcam.srcObject = stream;
+  await new Promise((resolve, reject) => {
+    webcam.onloadedmetadata = () => resolve();
+    webcam.onerror = () => reject(new Error('video error'));
+  });
+  await webcam.play();
+}
+
+function getActivation() {
+  return tf.tidy(() => {
+    const img = tf.browser.fromPixels(webcam);
+    return net.infer(img, 'conv_preds');
+  });
+}
+
+function dotProduct(a, b) {
+  let s = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) s += a[i] * b[i];
+  return s;
+}
+
+async function getNormalizedActivationVector() {
+  const activation = getActivation();
+  const flat = tf.tidy(() => tf.reshape(activation, [-1]));
+  const data = await flat.data();
+  flat.dispose();
+  activation.dispose();
+  let norm = 0;
+  for (let i = 0; i < data.length; i++) norm += data[i] * data[i];
+  norm = Math.sqrt(norm) || 1;
+  const out = new Float32Array(data.length);
+  for (let i = 0; i < data.length; i++) out[i] = data[i] / norm;
+  return out;
+}
+
+async function rebuildClassMeans() {
+  if (!classifier) {
+    classMeanEmbeddings = null;
+    return;
+  }
+  const ds = classifier.getClassifierDataset();
+  const labels = Object.keys(ds);
+  classMeanEmbeddings = {};
+  for (const label of labels) {
+    const t = ds[label];
+    const meanTensor = tf.tidy(() => tf.mean(t, 0));
+    const data = await meanTensor.data();
+    meanTensor.dispose();
+    let norm = 0;
+    for (let i = 0; i < data.length; i++) norm += data[i] * data[i];
+    norm = Math.sqrt(norm) || 1;
+    const nv = new Float32Array(data.length);
+    for (let i = 0; i < data.length; i++) nv[i] = data[i] / norm;
+    classMeanEmbeddings[label] = nv;
+  }
+  diagLog('Эталоны лиц (cosine к среднему): классов ' + labels.length);
+}
+
+async function importDatasetFromJsonObject(obj) {
+  if (!classifier) throw new Error('Классификатор не инициализирован');
+  const matrices = {};
+  for (const label of Object.keys(obj)) {
+    const item = obj[label];
+    if (!item || !item.shape || !item.values) continue;
+    matrices[label] = tf.tensor(item.values, item.shape, 'float32');
+  }
+  classifier.setClassifierDataset(matrices);
+  if (classifier.labelToClassId && typeof classifier.labelToClassId === 'object') {
+    let idx = 0;
+    for (const label of Object.keys(matrices)) {
+      classifier.labelToClassId[label] = idx++;
+    }
+    classifier.nextClassId = idx;
+  }
+  updateDatasetStatus();
+  await rebuildClassMeans();
+}
+
+async function tryLoadDatasetFromIndexedDB() {
+  if (!window.SurvLocalDB) return false;
+  try {
+    const ds = await SurvLocalDB.loadKnnDataset();
+    if (!ds || typeof ds !== 'object' || Object.keys(ds).length === 0) return false;
+    await importDatasetFromJsonObject(ds);
+    diagLog('KNN загружен из IndexedDB');
+    return true;
+  } catch (e) {
+    diagLog('IndexedDB KNN', e);
+    return false;
+  }
+}
+
+/** Резерв: старый экспорт в localStorage (мог не поместиться из‑за квоты). */
+async function tryLoadDatasetFromLocalStorage() {
+  const json = localStorage.getItem('surv_knn_dataset_json');
+  if (!json) return;
+  try {
+    await importDatasetFromJsonObject(JSON.parse(json));
+    diagLog('KNN загружен из localStorage (legacy)');
+  } catch (e) {
+    diagLog('knn localStorage', e);
+  }
+}
+
+async function predictLoop() {
+  if (isPredicting) return;
+  isPredicting = true;
+  try {
+    if (
+      !isTraining &&
+      employeeVerified &&
+      net &&
+      classifier &&
+      classifier.getNumExamples() > 0 &&
+      expectedEmployeeIdStr &&
+      classMeanEmbeddings
+    ) {
+      const vec = await getNormalizedActivationVector();
+      const expId = expectedEmployeeIdStr;
+      const sims = {};
+      for (const label of Object.keys(classMeanEmbeddings)) {
+        sims[label] = dotProduct(vec, classMeanEmbeddings[label]);
+      }
+      const entries = Object.entries(sims).sort((a, b) => b[1] - a[1]);
+      const best = entries[0];
+      const second = entries[1];
+      const simExp = sims[expId] != null ? sims[expId] : -1;
+      lastCosineToExpected = simExp;
+
+      const numClasses = entries.length;
+      let frameOk = false;
+      if (numClasses <= 1) {
+        frameOk = simExp >= COSINE_MIN_SAME_PERSON;
+      } else {
+        const margin = best && second ? best[1] - second[1] : 0;
+        frameOk =
+          best[0] === expId &&
+          simExp >= COSINE_MIN_SAME_PERSON &&
+          margin >= MARGIN_MIN_DIFFERENT_CLASSES;
+      }
+
+      if (frameOk) {
+        stableMatchFrames++;
+        if (stableMatchFrames >= STABLE_FRAMES_NEEDED) {
+          recognizedEmployeeId = expId;
+          recognizedConfidence = simExp;
+        }
+      } else {
+        stableMatchFrames = 0;
+        recognizedEmployeeId = null;
+        recognizedConfidence = 0;
+      }
+
+      setStatusText();
+      maybeEnableLogin();
+    }
+  } catch (e) {
+    console.error('predict', e);
+  } finally {
+    isPredicting = false;
+    requestAnimationFrame(predictLoop);
+  }
+}
+
+function resetVerificationUi() {
+  employeeVerified = false;
+  expectedEmployeeIdStr = null;
+  verifiedEmployeeName = '';
+  recognizedEmployeeId = null;
+  recognizedConfidence = 0;
+  stableMatchFrames = 0;
+  lastCosineToExpected = 0;
+  employeeInfo.textContent = '';
+  employeeInfo.style.color = '';
+  faceBlock.style.opacity = '0.5';
+  faceBlock.style.pointerEvents = 'none';
+  modelsStatus.textContent = 'модели: после проверки employeeId';
+  predictionStatus.textContent = 'лицо: ожидание…';
+  predictionStatus.className = 'tag bad';
+  maybeEnableLogin();
+}
+
+function fullResetFacePipeline() {
+  try {
+    if (webcam && webcam.srcObject) {
+      webcam.srcObject.getTracks().forEach((t) => t.stop());
+      webcam.srcObject = null;
+    }
+  } catch (_) {}
+  facePipelineStarted = false;
+  facePipelinePromise = null;
+  classifier = null;
+  net = null;
+  classMeanEmbeddings = null;
+  resetVerificationUi();
+}
+
+async function initFacePipeline() {
+  if (facePipelineStarted) return facePipelinePromise;
+  facePipelineStarted = true;
+  facePipelinePromise = (async () => {
+    if (typeof knnClassifier === 'undefined' || !knnClassifier.create) {
+      throw new Error('knn-classifier не загрузился');
+    }
+    classifier = knnClassifier.create();
+    const camPromise = setupWebcam().catch((err) => {
+      diagLog('Камера', err);
+      setBox(statusBox, 'Камера: ' + (err && err.message ? err.message : String(err)), 'error');
+    });
+    await initTfBackend();
+    await setupModels();
+    await camPromise;
+    let loaded = await tryLoadDatasetFromIndexedDB();
+    if (!loaded) await tryLoadDatasetFromLocalStorage();
+    updateDatasetStatus();
+    if (classifier.getNumExamples() === 0) {
+      setBox(
+        statusBox,
+        'В базе KNN нет примеров лица. Сначала обучите лицо на странице регистрации.',
+        'error'
+      );
+    }
+    requestAnimationFrame(predictLoop);
+  })();
+  return facePipelinePromise;
+}
+
+async function onCheckEmployee() {
+  const raw = employeeIdInput.value;
+  const id = raw ? parseInt(raw, 10) : NaN;
+  if (!id || Number.isNaN(id) || id < 1) {
+    setBox(statusBox, 'Введите корректный employeeId (число).', 'error');
+    return;
+  }
+
+  btnCheckEmployee.disabled = true;
+  employeeInfo.textContent = 'Проверка…';
+  setBox(statusBox, '', 'info');
+  statusBox.style.display = 'none';
 
   try {
-    if (mode === 'login') {
-      if (!lastDescriptor || gps.lat === null) {
-        throw new Error('Нужны лицо в кадре и GPS');
-      }
-      const resp = await fetch('/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          faceDescriptor: lastDescriptor,
-          latitude: gps.lat,
-          longitude: gps.lon
-        }),
-        cache: 'no-store'
-      });
-      let data;
-      try {
-        data = await resp.json();
-      } catch (e) {
-        throw new Error('Ответ сервера не JSON. Код: ' + resp.status + '. Перезапустите сервер.');
-      }
-      if (!resp.ok || !data.success) {
-        throw new Error(getLoginErrorMessage(resp, data, 'Ошибка входа'));
-      }
-      localStorage.setItem('surv_employee_id', data.employeeId);
-      statusBox.className = 'status success';
-      statusBox.textContent = `Вход выполнен. Переход на главную...`;
-      setTimeout(() => { window.location.href = '/dashboard.html'; }, 800);
-    } else {
-      const employeeId = parseInt(localStorage.getItem('surv_employee_id') || '0', 10);
-      if (!employeeId) {
-        throw new Error('Нет сохранённого сотрудника (выполните вход).');
-      }
-      const resp = await fetch('/logout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ employeeId }),
-        cache: 'no-store'
-      });
-      let data;
-      try {
-        data = await resp.json();
-      } catch (e) {
-        throw new Error('Ответ сервера не JSON. Код: ' + resp.status);
-      }
-      if (!resp.ok || !data.success) {
-        throw new Error(data.error || 'Ошибка выхода (код ' + resp.status + ')');
-      }
-      statusBox.className = 'status success';
-      statusBox.textContent = 'Выход выполнен. Время смены зафиксировано.';
+    if (!window.SurvLocalDB) {
+      throw new Error('Не загружен local-db.js');
     }
-  } catch (err) {
-    statusBox.className = 'status error';
-    statusBox.textContent = err && err.message ? err.message : String(err);
-    console.error('Login action error:', err);
+    const data = await SurvLocalDB.getEmployee(id);
+    diagLog('IndexedDB getEmployee(' + id + ') → ' + (data ? 'ok' : 'null'));
+
+    if (!data) {
+      employeeVerified = false;
+      expectedEmployeeIdStr = null;
+      employeeInfo.textContent = 'Сотрудник с таким employeeId не найден в локальной базе (IndexedDB).';
+      employeeInfo.style.color = '#f87171';
+      setBox(statusBox, 'Сначала зарегистрируйте сотрудника на странице регистрации (в этом же браузере).', 'error');
+      faceBlock.style.opacity = '0.5';
+      faceBlock.style.pointerEvents = 'none';
+      maybeEnableLogin();
+      return;
+    }
+
+    employeeVerified = true;
+    expectedEmployeeIdStr = String(data.id);
+    verifiedEmployeeName = data.name || '';
+    employeeInfo.textContent = 'Найден локально: ' + verifiedEmployeeName + ' (id ' + data.id + ')';
+    employeeInfo.style.color = '#93c5fd';
+    faceBlock.style.opacity = '1';
+    faceBlock.style.pointerEvents = 'auto';
+
+    modelsStatus.textContent = 'модели: загрузка…';
+    await initFacePipeline();
+    setStatusText();
+    maybeEnableLogin();
+  } catch (e) {
+    console.error(e);
+    employeeInfo.textContent = '';
+    setBox(statusBox, e && e.message ? e.message : String(e), 'error');
   } finally {
-    btnAction.disabled = false;
+    btnCheckEmployee.disabled = false;
+  }
+}
+
+btnCheckEmployee.addEventListener('click', onCheckEmployee);
+
+employeeIdInput.addEventListener('input', () => {
+  if (!employeeVerified) return;
+  const v = parseInt(employeeIdInput.value, 10);
+  const cur = expectedEmployeeIdStr ? parseInt(expectedEmployeeIdStr, 10) : NaN;
+  if (Number.isNaN(v) || v !== cur) {
+    fullResetFacePipeline();
   }
 });
 
+btnLogin.addEventListener('click', async () => {
+  const id = expectedEmployeeIdStr ? parseInt(expectedEmployeeIdStr, 10) : NaN;
+  if (!id || !faceMatchesExpected()) {
+    setBox(statusAction, 'Не подтверждены лицо или GPS.', 'error');
+    return;
+  }
+  if (gps.lat === null || gps.lon === null) {
+    setBox(statusAction, 'Нет GPS.', 'error');
+    return;
+  }
+
+  try {
+    btnLogin.disabled = true;
+    statusAction.style.display = 'block';
+    statusAction.className = 'status info';
+    statusAction.textContent = 'Вход (локально)…';
+
+    /** Сессия только в браузере — без POST на сервер. */
+    localStorage.setItem('surv_employee_id', String(id));
+    localStorage.setItem('surv_local_session_start', new Date().toISOString());
+    localStorage.setItem('surv_local_login', '1');
+    localStorage.setItem(
+      'surv_last_gps',
+      JSON.stringify({ lat: gps.lat, lon: gps.lon, at: new Date().toISOString() })
+    );
+
+    statusAction.className = 'status success';
+    statusAction.textContent = 'Вход выполнен. Переход в кабинет…';
+    setTimeout(() => {
+      window.location.href = '/dashboard.html';
+    }, 400);
+  } catch (e) {
+    setBox(statusAction, e && e.message ? e.message : String(e), 'error');
+  } finally {
+    btnLogin.disabled = false;
+    maybeEnableLogin();
+  }
+});
+
+const btnCopyDiag = document.getElementById('btnCopyDiag');
+if (btnCopyDiag) {
+  btnCopyDiag.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(diagLines.join('\n'));
+    } catch (e) {
+      diagLog('clipboard', e);
+    }
+  });
+}
+
+window.addEventListener('error', (ev) => {
+  diagLog('onerror: ' + (ev && ev.message), ev.error);
+});
+
+window.addEventListener('unhandledrejection', (ev) => {
+  diagLog('rejection', ev.reason);
+});
+
+async function boot() {
+  diagLog('boot');
+  if (location.protocol === 'file:') {
+    modelsStatus.textContent = 'ошибка';
+    setBox(statusBox, 'Откройте http://localhost:3000/login.html', 'error');
+    return;
+  }
+  if (typeof window.__SURV_CDN_ERR === 'string') {
+    diagLog('CDN ' + window.__SURV_CDN_ERR);
+    modelsStatus.textContent = 'ошибка CDN';
+    return;
+  }
+  if (!window.SurvLocalDB) {
+    modelsStatus.textContent = 'ошибка';
+    setBox(statusBox, 'Подключите local-db.js перед login.js', 'error');
+    return;
+  }
+
+  modelsStatus.textContent = 'модели: после проверки employeeId';
+  startGps();
+}
+
+window.addEventListener('DOMContentLoaded', boot);
