@@ -37,10 +37,8 @@ const statusAction = document.getElementById('statusAction');
  * а по косинусной близости текущего кадра к среднему эмбеддингу класса.
  */
 const COSINE_MIN_SAME_PERSON = 0.84;
-/** Если в базе несколько сотрудников — отрыв лучшего от второго (меньше путаницы «чужой как вы»). */
-const MARGIN_MIN_DIFFERENT_CLASSES = 0.05;
-/** Подряд кадров с хорошим совпадением, чтобы снизить случайные совпадения. */
-const STABLE_FRAMES_NEEDED = 10;
+/** Подряд кадров с хорошим совпадением (после снятия лишнего margin между классами). */
+const STABLE_FRAMES_NEEDED = 6;
 
 let net = null;
 let classifier = null;
@@ -49,6 +47,8 @@ let classMeanEmbeddings = null;
 let stableMatchFrames = 0;
 /** Последняя cos-схожесть с ожидаемым employeeId (для подсказки в UI) */
 let lastCosineToExpected = 0;
+/** Для подсказки: кто «ближе всех» по эталону, если не вы */
+let lastFaceDebug = { bestId: '', bestSim: 0, secondId: '', secondSim: 0 };
 
 /** После успешной проверки сотрудника в IndexedDB */
 let employeeVerified = false;
@@ -84,14 +84,27 @@ function setStatusText() {
     return;
   }
   if (!recognizedEmployeeId) {
-    predictionStatus.textContent =
+    let line =
       'лицо: cos к вашему эталону = ' +
       lastCosineToExpected.toFixed(2) +
       ' (нужно ≥ ' +
       COSINE_MIN_SAME_PERSON +
-      ', подряд ~' +
+      ', подряд ' +
       STABLE_FRAMES_NEEDED +
-      ' кадров)';
+      ' кадров: ' +
+      stableMatchFrames +
+      '/' +
+      STABLE_FRAMES_NEEDED +
+      ')';
+    if (lastFaceDebug.bestId && lastFaceDebug.bestId !== expectedEmployeeIdStr) {
+      line +=
+        ' · сейчас ближе id ' +
+        lastFaceDebug.bestId +
+        ' (cos ' +
+        lastFaceDebug.bestSim.toFixed(2) +
+        ')';
+    }
+    predictionStatus.textContent = line;
     predictionStatus.className = 'tag bad';
     return;
   }
@@ -173,16 +186,77 @@ async function startGps() {
       const code = err && err.code;
       gpsStatus.textContent = 'GPS: ' + geolocationErrorMessage(code);
       gpsStatus.className = 'tag bad';
+      gpsCoords.textContent =
+        'Без сети браузер часто не получает точку. Нажмите «Последние координаты» или введите lat/lon вручную.';
       diagLog('GPS error', err);
       maybeEnableLogin();
     },
-    { enableHighAccuracy: false, timeout: 30000, maximumAge: 0 }
+    {
+      enableHighAccuracy: false,
+      timeout: 30000,
+      /** Разрешить кэш браузера (часто даёт точку без сети, если недавно уже определялись). */
+      maximumAge: 300000
+    }
   );
+}
+
+/**
+ * Координаты из прошлого успешного входа (localStorage) — для работы без сети / без свежего GPS.
+ */
+function applySavedGpsFromStorage() {
+  try {
+    const raw = localStorage.getItem('surv_last_gps');
+    if (!raw) {
+      gpsCoords.textContent = 'Сохранённых координат ещё нет — введите lat/lon вручную ниже.';
+      return false;
+    }
+    const j = JSON.parse(raw);
+    if (j.lat == null || j.lon == null) return false;
+    gps.lat = Number(j.lat);
+    gps.lon = Number(j.lon);
+    gpsStatus.textContent = 'GPS: сохранённые';
+    gpsStatus.className = 'tag ok';
+    gpsCoords.textContent = `lat=${gps.lat.toFixed(6)}, lon=${gps.lon.toFixed(6)} (из последнего входа, офлайн)`;
+    diagLog('GPS из surv_last_gps');
+    maybeEnableLogin();
+    return true;
+  } catch (e) {
+    diagLog('saved GPS', e);
+    return false;
+  }
+}
+
+function applyManualGps() {
+  const latEl = document.getElementById('manualLat');
+  const lonEl = document.getElementById('manualLon');
+  const lat = latEl ? parseFloat(latEl.value) : NaN;
+  const lon = lonEl ? parseFloat(lonEl.value) : NaN;
+  if (Number.isNaN(lat) || Number.isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+    gpsCoords.textContent =
+      'Некорректные координаты. lat: -90…90, lon: -180…180 (можно с точкой: 47.21).';
+    return;
+  }
+  gps.lat = lat;
+  gps.lon = lon;
+  gpsStatus.textContent = 'GPS: вручную';
+  gpsStatus.className = 'tag ok';
+  gpsCoords.textContent = `lat=${gps.lat.toFixed(6)}, lon=${gps.lon.toFixed(6)} (ввод вручную, офлайн)`;
+  try {
+    localStorage.setItem(
+      'surv_last_gps',
+      JSON.stringify({ lat: gps.lat, lon: gps.lon, at: new Date().toISOString() })
+    );
+  } catch (_) {}
+  diagLog('GPS вручную');
+  maybeEnableLogin();
 }
 
 if (btnRetryGps) {
   btnRetryGps.addEventListener('click', () => startGps());
 }
+
+document.getElementById('btnUseSavedGps')?.addEventListener('click', () => applySavedGpsFromStorage());
+document.getElementById('btnApplyManualGps')?.addEventListener('click', applyManualGps);
 
 function withTimeout(promise, ms, label) {
   return Promise.race([
@@ -216,11 +290,14 @@ async function initTfBackend() {
   throw new Error('TensorFlow.js: ' + (lastErr && lastErr.message));
 }
 
+/** Локальные веса MobileNet v2 (см. scripts/download-mobilenet-model.js), без TF Hub в рантайме */
+const MOBILENET_MODEL_URL = '/vendor/mobilenet-model/model.json';
+
 async function setupModels() {
   if (!mobilenet) throw new Error('MobileNet не загрузился');
   modelsStatus.textContent = 'модели: MobileNet…';
   net = await withTimeout(
-    mobilenet.load({ version: 2, alpha: 1.0 }),
+    mobilenet.load({ version: 2, alpha: 1.0, modelUrl: MOBILENET_MODEL_URL }),
     120000,
     'MobileNet'
   );
@@ -361,17 +438,21 @@ async function predictLoop() {
       const second = entries[1];
       const simExp = sims[expId] != null ? sims[expId] : -1;
       lastCosineToExpected = simExp;
+      lastFaceDebug = {
+        bestId: best ? String(best[0]) : '',
+        bestSim: best ? best[1] : 0,
+        secondId: second ? String(second[0]) : '',
+        secondSim: second ? second[1] : 0
+      };
 
       const numClasses = entries.length;
       let frameOk = false;
       if (numClasses <= 1) {
         frameOk = simExp >= COSINE_MIN_SAME_PERSON;
       } else {
-        const margin = best && second ? best[1] - second[1] : 0;
-        frameOk =
-          best[0] === expId &&
-          simExp >= COSINE_MIN_SAME_PERSON &&
-          margin >= MARGIN_MIN_DIFFERENT_CLASSES;
+        // Раньше требовали ещё margin ≥ 0.05 между 1-м и 2-м классом — при cos 0.92 vs 0.89 вход не давали.
+        // Достаточно: вы — лучший похожий класс и cos к вашему эталону не ниже порога (стабильность — счётчик кадров).
+        frameOk = best[0] === expId && simExp >= COSINE_MIN_SAME_PERSON;
       }
 
       if (frameOk) {
@@ -405,6 +486,7 @@ function resetVerificationUi() {
   recognizedConfidence = 0;
   stableMatchFrames = 0;
   lastCosineToExpected = 0;
+  lastFaceDebug = { bestId: '', bestSim: 0, secondId: '', secondSim: 0 };
   employeeInfo.textContent = '';
   employeeInfo.style.color = '';
   faceBlock.style.opacity = '0.5';
@@ -587,11 +669,6 @@ async function boot() {
   if (location.protocol === 'file:') {
     modelsStatus.textContent = 'ошибка';
     setBox(statusBox, 'Откройте http://localhost:3000/login.html', 'error');
-    return;
-  }
-  if (typeof window.__SURV_CDN_ERR === 'string') {
-    diagLog('CDN ' + window.__SURV_CDN_ERR);
-    modelsStatus.textContent = 'ошибка CDN';
     return;
   }
   if (!window.SurvLocalDB) {

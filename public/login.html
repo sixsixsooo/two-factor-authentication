@@ -6,18 +6,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="style.css">
 
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js" onerror="window.__SURV_CDN_ERR='tf'"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js" onerror="window.__SURV_CDN_ERR='mobilenet'"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/knn-classifier@1.2.6/dist/knn-classifier.min.js" onerror="window.__SURV_CDN_ERR='knn'"></script>
+  <script src="vendor/tfjs/tf.min.js"></script>
+  <script src="vendor/mobilenet/mobilenet.min.js"></script>
+  <script src="vendor/knn-classifier/knn-classifier.min.js"></script>
 
   <script defer src="local-db.js"></script>
-  <script defer src="login.js?v=9"></script>
+  <script defer src="login.js?v=11"></script>
 </head>
 <body>
 <div class="container">
   <a href="index.html" class="small">&larr; На главную</a>
   <h1>Вход</h1>
-  <p class="subtitle">Введите employeeId — проверка в <strong>локальной IndexedDB</strong>, затем лицо (KNN) и GPS.</p>
+  <p class="subtitle">Введите employeeId — проверка в <strong>локальной IndexedDB</strong>, затем лицо и координаты (GPS или <strong>вручную / из прошлого входа</strong> офлайн).</p>
   <p class="small">Нет профиля? <a href="register.html">Регистрация сотрудника и обучение лица</a></p>
   <p class="small">Сотрудники и лица хранятся только в браузере на этом ПК. Используйте тот же браузер, что и при регистрации. Адрес: <code>http://localhost:3000</code>.</p>
 
@@ -69,6 +69,17 @@
           <button type="button" class="btn secondary" id="btnRetryGps" style="padding: 6px 12px; font-size: 0.85rem;">Повторить GPS</button>
         </div>
         <p class="small" id="gpsCoords"></p>
+        <button type="button" class="btn secondary" id="btnUseSavedGps" style="margin-top: 8px;">
+          Последние координаты (после прошлого входа)
+        </button>
+        <details class="small" style="margin-top: 10px;">
+          <summary>Нет GPS / без интернета — ввести координаты вручную</summary>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px;">
+            <label>lat <input id="manualLat" type="number" step="any" placeholder="55.75" style="width: 6.5rem;"></label>
+            <label>lon <input id="manualLon" type="number" step="any" placeholder="37.62" style="width: 6.5rem;"></label>
+            <button type="button" class="btn secondary" id="btnApplyManualGps">Применить</button>
+          </div>
+        </details>
       </div>
 
       <button class="btn" id="btnLogin" disabled>Войти</button>

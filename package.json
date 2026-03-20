@@ -5,9 +5,15 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "postinstall": "node scripts/vendor-tfjs.js && node scripts/download-mobilenet-model.js",
+    "vendor:tf": "node scripts/vendor-tfjs.js",
+    "vendor:model": "node scripts/download-mobilenet-model.js"
   },
   "dependencies": {
+    "@tensorflow-models/knn-classifier": "^1.2.6",
+    "@tensorflow-models/mobilenet": "^2.1.1",
+    "@tensorflow/tfjs": "^4.20.0",
     "cors": "^2.8.5",
     "exceljs": "^4.4.0",
     "express": "^4.19.0",
@@ -16,9 +22,6 @@
     "sqlite3": "^5.1.7"
   },
   "devDependencies": {
-    "@tensorflow-models/knn-classifier": "^1.2.6",
-    "@tensorflow-models/mobilenet": "^2.1.1",
-    "@tensorflow/tfjs": "^4.20.0",
     "nodemon": "^3.1.0"
   }
 }

@@ -69,10 +69,12 @@ async function initTfBackend() {
   throw new Error('Не удалось запустить TensorFlow.js');
 }
 
+const MOBILENET_MODEL_URL = '/vendor/mobilenet-model/model.json';
+
 async function setupModels() {
   modelsStatus.textContent = 'модели: MobileNet…';
   net = await withTimeout(
-    mobilenet.load({ version: 2, alpha: 1.0 }),
+    mobilenet.load({ version: 2, alpha: 1.0, modelUrl: MOBILENET_MODEL_URL }),
     120000,
     'MobileNet'
   );
@@ -261,10 +263,6 @@ async function main() {
   if (location.protocol === 'file:') {
     modelsStatus.textContent = 'ошибка';
     showStatus('error', 'Откройте http://localhost:3000/register.html');
-    return;
-  }
-  if (typeof window.__SURV_CDN_ERR === 'string') {
-    modelsStatus.textContent = 'ошибка CDN';
     return;
   }
   if (!window.SurvLocalDB) {
