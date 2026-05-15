@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Кабинет бухгалтера — СКУД</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="style.css">
+  <script defer src="surv-api.js"></script>
+  <script defer src="accountant.js?v=2"></script>
+</head>
+<body>
+<div class="container">
+  <a href="index.html" class="small">&larr; На главную</a>
+  <h1>Кабинет бухгалтера</h1>
+  <p class="subtitle" id="accountantGreeting">Сводка, табель T-13, опоздания, расчёт зарплаты</p>
+
+  <div class="panel" id="loginRequestsPanel" style="margin-top:16px;">
+    <div class="panel-header">
+      <div class="panel-title">Запросы на вход (логин и пароль)</div>
+      <button type="button" class="btn secondary" id="btnRefreshLoginRequests" style="padding:6px 12px; font-size:0.85rem;">Обновить</button>
+    </div>
+    <div id="loginRequestsBox" class="small">Загрузка…</div>
+  </div>
+
+  <div class="panel skud-filters">
+    <div class="form-row" style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end;">
+      <label>Период с <input id="filterFrom" type="date"></label>
+      <label>по <input id="filterTo" type="date"></label>
+      <label>Месяц T-13 <input id="filterMonth" type="month"></label>
+      <button type="button" class="btn secondary" id="btnRefresh">Обновить</button>
+    </div>
+  </div>
+
+  <div class="layout-two-columns" style="margin-top:16px;">
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title">Сводка</div></div>
+      <div id="overviewBox" class="small">Загрузка…</div>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title">Экспорт</div></div>
+      <button type="button" class="btn secondary" id="btnExcelPayroll">Табель зарплаты (Excel)</button>
+      <button type="button" class="btn secondary" id="btnExcelT13" style="margin-top:8px;">Табель T-13 (Excel)</button>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-header"><div class="panel-title">Расчёт по сотрудникам</div></div>
+    <div class="table-wrap">
+      <table class="data-table" id="payrollTable">
+        <thead>
+          <tr>
+            <th>ID</th><th>Имя</th><th>График</th><th>Ставка</th><th>Смен</th><th>Часы</th><th>₽</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-header"><div class="panel-title">Опоздания</div></div>
+    <div class="table-wrap">
+      <table class="data-table" id="lateTable">
+        <thead>
+          <tr>
+            <th>Дата</th><th>Сотрудник</th><th>Ожидалось</th><th>Факт</th><th>Опоздание, мин</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-header"><div class="panel-title">Табель T-13 (часы по дням)</div></div>
+    <div id="t13Container" class="small">Выберите месяц и нажмите «Обновить».
+  </div>
+
+  <div class="panel" style="margin-top:16px;">
+    <div class="panel-header"><div class="panel-title">Сотрудники и карты</div></div>
+    <div class="table-wrap">
+      <table class="data-table" id="staffTable">
+        <thead>
+          <tr><th>ID</th><th>Имя</th><th>Роль</th><th>RFID</th><th>График</th><th>Ставка</th><th>Начало дня</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+</body>
+</html>

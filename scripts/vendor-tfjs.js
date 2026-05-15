@@ -22,3 +22,4 @@ function copy(relFrom, relTo) {
 copy('@tensorflow/tfjs/dist/tf.min.js', 'vendor/tfjs/tf.min.js');
 copy('@tensorflow-models/mobilenet/dist/mobilenet.min.js', 'vendor/mobilenet/mobilenet.min.js');
 copy('@tensorflow-models/knn-classifier/dist/knn-classifier.min.js', 'vendor/knn-classifier/knn-classifier.min.js');
+copy('@tensorflow-models/blazeface/dist/blazeface.min.umd.js', 'vendor/blazeface/blazeface.min.js');

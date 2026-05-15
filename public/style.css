@@ -249,6 +249,52 @@ canvas {
   height: 100%;
 }
 
+.rfid-capture-input {
+  width: 100%;
+  font-family: inherit;
+  letter-spacing: 0.15em;
+  background: #0f172a;
+  border: 1px dashed #475569;
+  color: transparent;
+  caret-color: #93c5fd;
+}
+
+.rfid-capture-input::placeholder {
+  color: #64748b;
+  letter-spacing: normal;
+}
+
+.rfid-capture-input:focus {
+  border-color: #3b82f6;
+  outline: none;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.data-table th,
+.data-table td {
+  border: 1px solid #334155;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.data-table th {
+  background: #1e293b;
+  color: #93c5fd;
+}
+
+.data-table tbody tr:nth-child(even) {
+  background: rgba(15, 23, 42, 0.6);
+}
+
 .tag {
   display: inline-flex;
   align-items: center;

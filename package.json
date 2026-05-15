@@ -6,20 +6,23 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "postinstall": "node scripts/vendor-tfjs.js && node scripts/download-mobilenet-model.js",
+    "postinstall": "node scripts/vendor-tfjs.js && node scripts/download-mobilenet-model.js && node scripts/download-blazeface-model.js",
     "vendor:tf": "node scripts/vendor-tfjs.js",
-    "vendor:model": "node scripts/download-mobilenet-model.js"
+    "vendor:model": "node scripts/download-mobilenet-model.js",
+    "vendor:blazeface": "node scripts/download-blazeface-model.js"
   },
   "dependencies": {
+    "@tensorflow-models/blazeface": "^0.1.0",
     "@tensorflow-models/knn-classifier": "^1.2.6",
     "@tensorflow-models/mobilenet": "^2.1.1",
     "@tensorflow/tfjs": "^4.20.0",
+    "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "exceljs": "^4.4.0",
     "express": "^4.19.0",
     "helmet": "^7.0.0",
     "morgan": "^1.10.0",
-    "sqlite3": "^5.1.7"
+    "mysql2": "^3.14.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"

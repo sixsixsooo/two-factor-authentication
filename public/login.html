@@ -7,21 +7,46 @@
   <link rel="stylesheet" href="style.css">
 
   <script src="vendor/tfjs/tf.min.js"></script>
+  <script src="vendor/blazeface/blazeface.min.js"></script>
   <script src="vendor/mobilenet/mobilenet.min.js"></script>
   <script src="vendor/knn-classifier/knn-classifier.min.js"></script>
 
-  <script defer src="local-db.js"></script>
-  <script defer src="login.js?v=11"></script>
+  <script defer src="surv-api.js"></script>
+  <script defer src="rfid-reader.js"></script>
+  <script defer src="face-pipeline.js?v=1"></script>
+  <script defer src="login.js?v=17"></script>
 </head>
 <body>
 <div class="container">
   <a href="index.html" class="small">&larr; На главную</a>
   <h1>Вход</h1>
-  <p class="subtitle">Введите employeeId — проверка в <strong>локальной IndexedDB</strong>, затем лицо и координаты (GPS или <strong>вручную / из прошлого входа</strong> офлайн).</p>
-  <p class="small">Нет профиля? <a href="register.html">Регистрация сотрудника и обучение лица</a></p>
-  <p class="small">Сотрудники и лица хранятся только в браузере на этом ПК. Используйте тот же браузер, что и при регистрации. Адрес: <code>http://localhost:3000</code>.</p>
+  <p class="small">Нет профиля? <a href="register.html">Регистрация</a></p>
 
-  <div class="layout-two-columns">
+  <div style="margin-bottom: 16px;">
+    <button type="button" class="btn secondary" id="btnShowPasswordLogin">Вход по логину и паролю</button>
+    <button type="button" class="btn secondary" id="btnBackSkud" style="display:none;">&larr; Лицо и пропуск</button>
+  </div>
+
+  <div id="panelPassword" style="display:none;">
+    <div class="panel">
+      <div class="panel-header"><div class="panel-title">Резервный вход</div></div>
+      <p class="small">После ввода логина и пароля бухгалтер подтверждает вход в кабинете. Без подтверждения войти нельзя.</p>
+      <div class="form-row">
+        <label for="passwordLogin">Логин</label>
+        <input id="passwordLogin" autocomplete="username" placeholder="Как при регистрации">
+      </div>
+      <div class="form-row">
+        <label for="passwordPassword">Пароль</label>
+        <input id="passwordPassword" type="password" autocomplete="current-password" placeholder="Пароль">
+      </div>
+      <button type="button" class="btn secondary" id="btnPasswordRequest">Запросить подтверждение</button>
+      <p id="passwordStatus" class="small" style="margin-top:10px; color:#9ca3af;"></p>
+      <button class="btn" id="btnLoginPassword" disabled style="margin-top:12px;">Войти</button>
+      <div id="statusActionPassword" class="status info" style="display:none; margin-top:10px;"></div>
+    </div>
+  </div>
+
+  <div id="panelSkud" class="layout-two-columns">
     <div class="panel">
       <div class="panel-header">
         <div class="panel-title">Идентификация</div>
@@ -32,7 +57,7 @@
         <label for="employeeIdInput">employeeId</label>
         <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
           <input id="employeeIdInput" type="number" min="1" placeholder="Например: 1" style="flex: 1; min-width: 120px;">
-          <button type="button" class="btn secondary" id="btnCheckEmployee">Проверить локально</button>
+          <button type="button" class="btn secondary" id="btnCheckEmployee">Проверить в БД</button>
         </div>
       </div>
       <p id="employeeInfo" class="small" style="min-height: 1.5em; color: #93c5fd;"></p>
@@ -53,40 +78,22 @@
         <summary>Журнал отладки</summary>
         <pre id="diagLog" class="diag-pre"></pre>
         <button type="button" class="btn secondary" id="btnCopyDiag" style="margin-top: 8px;">Копировать лог</button>
-        <p class="small">Откройте через <strong>http://localhost:3000/login.html</strong> (не file://).</p>
       </details>
     </div>
 
     <div class="panel">
       <div class="panel-header">
-        <div class="panel-title">Местоположение и вход</div>
+        <div class="panel-title">Пропуск и вход</div>
       </div>
 
-      <div class="form-row">
-        <label>Текущее местоположение</label>
-        <div class="tags-row" style="flex-wrap: wrap; gap: 8px;">
-          <span id="gpsStatus" class="tag">GPS: ожидание…</span>
-          <button type="button" class="btn secondary" id="btnRetryGps" style="padding: 6px 12px; font-size: 0.85rem;">Повторить GPS</button>
-        </div>
-        <p class="small" id="gpsCoords"></p>
-        <button type="button" class="btn secondary" id="btnUseSavedGps" style="margin-top: 8px;">
-          Последние координаты (после прошлого входа)
-        </button>
-        <details class="small" style="margin-top: 10px;">
-          <summary>Нет GPS / без интернета — ввести координаты вручную</summary>
-          <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px;">
-            <label>lat <input id="manualLat" type="number" step="any" placeholder="55.75" style="width: 6.5rem;"></label>
-            <label>lon <input id="manualLon" type="number" step="any" placeholder="37.62" style="width: 6.5rem;"></label>
-            <button type="button" class="btn secondary" id="btnApplyManualGps">Применить</button>
-          </div>
-        </details>
+      <div class="form-row" id="rfidBlock" style="opacity:0.5; pointer-events:none;">
+        <label for="rfidLoginCapture">RFID-пропуск</label>
+        <input id="rfidLoginCapture" type="password" class="rfid-capture-input" placeholder="После подтверждения лица — приложите карту" autocomplete="off">
+        <p id="rfidLoginStatus" class="small" style="margin-top:6px; color:#9ca3af;">Пропуск: ожидание…</p>
       </div>
 
       <button class="btn" id="btnLogin" disabled>Войти</button>
-      <p class="small" id="loginHint" style="margin-top: 10px; color: #9ca3af;">
-        Сначала «Проверить локально», затем смотрите в камеру и дождитесь «лицо: совпало», затем «Войти».
-      </p>
-      <div id="statusAction" class="status info" style="display:none;"></div>
+      <div id="statusAction" class="status info" style="display:none; margin-top:10px;"></div>
     </div>
   </div>
 </div>

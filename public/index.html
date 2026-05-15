@@ -2,45 +2,52 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>СУРВ — система учета рабочего времени</title>
+  <title>СКУД / СУРВ</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="container">
-  <h1>СУРВ</h1>
-  <p class="subtitle">Система учета рабочего времени сотрудников</p>
+  <h1>СКУД / СУРВ</h1>
+  <p class="subtitle">Учёт времени, биометрия, RFID-карта, кабинет бухгалтера</p>
 
   <div id="loggedInHint" class="panel" style="display: none;">
-    <p class="small">Вы вошли в систему. <a href="dashboard.html">Перейти в личный кабинет →</a></p>
+    <p class="small" id="loggedInLinks">Вы вошли в систему.</p>
   </div>
 
   <div class="cards">
     <a class="card" href="register.html">
-      <h2>Регистрация сотрудника</h2>
-      <p>Создать карточку в базе и обучить лицо (KNN) под employeeId.</p>
+      <h2>Регистрация</h2>
     </a>
     <a class="card" href="login.html">
       <h2>Вход</h2>
-      <p>Проверка employeeId, лицо и GPS — начало смены.</p>
+    </a>
+    <a class="card" href="accountant.html" id="cardAccountant" style="display:none;">
+      <h2>Кабинет бухгалтера</h2>
     </a>
   </div>
 
   <div class="footer-links">
-    <button id="btnSalary" class="btn secondary">Скачать табель (Excel)</button>
-    <button id="btnLogs" class="btn secondary" onclick="window.open('/logs-view.html','_blank')">Логи</button>
+    <button id="btnLogs" class="btn secondary" onclick="window.open('/logs-view.html','_blank')">Логи сервера</button>
   </div>
 </div>
 
 <script>
-  document.getElementById('btnSalary').addEventListener('click', () => {
-    const now = new Date().toISOString();
-    window.location.href = `/salary/excel?to=${encodeURIComponent(now)}`;
-  });
-  if (localStorage.getItem('surv_employee_id')) {
+  (function () {
+    var id = localStorage.getItem('surv_employee_id');
+    var role = localStorage.getItem('surv_role');
+    if (!id) return;
     document.getElementById('loggedInHint').style.display = 'block';
-  }
+    var links = document.getElementById('loggedInLinks');
+    if (role === 'accountant') {
+      links.innerHTML =
+        'Бухгалтер. <a href="accountant.html">Кабинет бухгалтера →</a>';
+      document.getElementById('cardAccountant').style.display = '';
+    } else {
+      links.innerHTML =
+        'Сотрудник. <a href="dashboard.html">Личный кабинет →</a>';
+    }
+  })();
 </script>
 </body>
 </html>
-

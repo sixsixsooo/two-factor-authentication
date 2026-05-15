@@ -1,82 +1,178 @@
 <!doctype html>
 <html lang="ru">
-<head>
-  <meta charset="UTF-8">
-  <title>Регистрация сотрудника — СУРВ</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="stylesheet" href="style.css">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Регистрация сотрудника — СУРВ</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="style.css" />
 
-  <script src="vendor/tfjs/tf.min.js"></script>
-  <script src="vendor/mobilenet/mobilenet.min.js"></script>
-  <script src="vendor/knn-classifier/knn-classifier.min.js"></script>
+    <script src="vendor/tfjs/tf.min.js"></script>
+    <script src="vendor/blazeface/blazeface.min.js"></script>
+    <script src="vendor/mobilenet/mobilenet.min.js"></script>
+    <script src="vendor/knn-classifier/knn-classifier.min.js"></script>
 
-  <script defer src="local-db.js"></script>
-  <script defer src="register.js?v=10"></script>
-</head>
-<body>
-<div class="container">
-  <a href="index.html" class="small">&larr; На главную</a>
-  <h1>Регистрация сотрудника</h1>
-  <p class="subtitle">Заполните данные, смотрите в камеру и нажмите одну кнопку — карточка, лицо и KNN сохраняются <strong>локально в IndexedDB</strong> на этом компьютере (без сервера).</p>
-  <p class="small">Уже есть профиль? <a href="login.html">Вход по лицу и GPS</a></p>
+    <script defer src="surv-api.js"></script>
+    <script defer src="rfid-reader.js"></script>
+    <script defer src="face-pipeline.js?v=1"></script>
+    <script defer src="register.js?v=15"></script>
+  </head>
+  <body>
+    <div class="container">
+      <a href="index.html" class="small">&larr; На главную</a>
+      <h1>Регистрация сотрудника</h1>
+      <p class="subtitle">
+        Регистрация сотрудника: лицо, RFID-пропуск, логин и пароль для
+        резервного входа.
+      </p>
+      <p class="small">Уже есть профиль? <a href="login.html">Вход</a></p>
 
-  <div class="layout-two-columns">
-    <div class="panel">
-      <div class="panel-header">
-        <div class="panel-title">Данные сотрудника</div>
+      <div class="layout-two-columns">
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">Данные сотрудника</div>
+          </div>
+
+          <form id="registerForm" onsubmit="return false;">
+            <div class="form-row">
+              <label for="name">Имя сотрудника</label>
+              <input id="name" required placeholder="Например, Иван Петров" />
+            </div>
+
+            <div class="form-row">
+              <label for="loginName">Логин (резервный вход)</label>
+              <input
+                id="loginName"
+                required
+                autocomplete="username"
+                placeholder="ivan.petrov"
+              />
+            </div>
+
+            <div class="form-row">
+              <label for="email">E-mail</label>
+              <input
+                id="email"
+                type="email"
+                required
+                autocomplete="email"
+                placeholder="name@company.ru"
+              />
+            </div>
+
+            <div class="form-row">
+              <label for="password">Пароль</label>
+              <input
+                id="password"
+                type="password"
+                required
+                autocomplete="new-password"
+                minlength="6"
+                placeholder="Не менее 6 символов"
+              />
+            </div>
+
+            <div class="form-row">
+              <label for="schedule">График</label>
+              <select id="schedule" required>
+                <option value="5/2">5/2</option>
+                <option value="2/2">2/2</option>
+              </select>
+            </div>
+
+            <div class="form-row">
+              <label for="rate">Ставка (₽/час)</label>
+              <input
+                id="rate"
+                type="number"
+                min="0"
+                step="1"
+                required
+                placeholder="Например, 500"
+              />
+            </div>
+
+            <div class="form-row">
+              <label for="role">Роль</label>
+              <select id="role">
+                <option value="employee">Сотрудник</option>
+                <option value="accountant">Бухгалтер</option>
+              </select>
+            </div>
+
+            <div class="form-row">
+              <label for="workStart">Начало рабочего дня</label>
+              <input id="workStart" type="time" value="09:00" />
+            </div>
+
+            <div class="form-row">
+              <label for="rfidCapture">RFID-пропуск</label>
+              <input
+                id="rfidCapture"
+                type="password"
+                class="rfid-capture-input"
+                placeholder="Кликните сюда и приложите карту"
+                autocomplete="off"
+              />
+              <p
+                id="rfidStatus"
+                class="small"
+                style="color: #93c5fd; margin-top: 6px"
+              >
+                Пропуск: не считан
+              </p>
+            </div>
+          </form>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title">Камера</div>
+            <span id="modelsStatus" class="tag">модели: ожидание…</span>
+          </div>
+          <div class="video-wrapper">
+            <video id="webcam" autoplay muted playsinline></video>
+          </div>
+          <div class="tags-row" style="margin-top: 8px">
+            <span id="datasetStatus" class="tag">база: —</span>
+            <span id="predictionStatus" class="tag">готово</span>
+          </div>
+        </div>
       </div>
 
-      <form id="registerForm" onsubmit="return false;">
-        <div class="form-row">
-          <label for="name">Имя сотрудника</label>
-          <input id="name" required placeholder="Например, Иван Петров">
-        </div>
+      <div class="panel" style="margin-top: 20px">
+        <button type="button" class="btn" id="btnRegisterFull" disabled>
+          Зарегистрировать (карточка в БД + лицо + сохранение)
+        </button>
+        <p class="small" style="margin-top: 10px; color: #9ca3af">
+          Один шаг: запись в MySQL (<code>employees</code> +
+          <code>knn_dataset</code> на сервере), обучение KNN по лицу. Откройте
+          страницу через <code>http://localhost:3000</code> (не
+          <code>file://</code>).
+        </p>
+        <div
+          id="status"
+          class="status info"
+          style="display: none; margin-top: 12px"
+        ></div>
+        <div
+          id="faceStatus"
+          class="status info"
+          style="display: none; margin-top: 10px"
+        ></div>
 
-        <div class="form-row">
-          <label for="schedule">График</label>
-          <select id="schedule" required>
-            <option value="5/2">5/2</option>
-            <option value="2/2">2/2</option>
-          </select>
-        </div>
-
-        <div class="form-row">
-          <label for="rate">Ставка (₽/час)</label>
-          <input id="rate" type="number" min="0" step="1" required placeholder="Например, 500">
-        </div>
-      </form>
+        <details class="diag-details" style="margin-top: 14px">
+          <summary>Журнал отладки</summary>
+          <pre id="diagLog" class="diag-pre"></pre>
+          <button
+            type="button"
+            class="btn secondary"
+            id="btnCopyDiag"
+            style="margin-top: 8px"
+          >
+            Копировать лог
+          </button>
+        </details>
+      </div>
     </div>
-
-    <div class="panel">
-      <div class="panel-header">
-        <div class="panel-title">Камера</div>
-        <span id="modelsStatus" class="tag">модели: ожидание…</span>
-      </div>
-      <div class="video-wrapper">
-        <video id="webcam" autoplay muted playsinline></video>
-      </div>
-      <div class="tags-row" style="margin-top: 8px;">
-        <span id="datasetStatus" class="tag">база: —</span>
-        <span id="predictionStatus" class="tag">готово</span>
-      </div>
-    </div>
-  </div>
-
-  <div class="panel" style="margin-top: 20px;">
-    <button type="button" class="btn" id="btnRegisterFull" disabled>Зарегистрировать (карточка в БД + лицо + сохранение)</button>
-    <p class="small" style="margin-top: 10px; color: #9ca3af;">
-      Один шаг: запись в таблицу <code>employees</code> в IndexedDB, обучение KNN и сохранение признаков лица в IndexedDB. Данные не уходят на сервер — только в браузер этого ПК.
-      Откройте страницу через <code>http://localhost:3000</code> (не <code>file://</code>).
-    </p>
-    <div id="status" class="status info" style="display:none; margin-top: 12px;"></div>
-    <div id="faceStatus" class="status info" style="display:none; margin-top: 10px;"></div>
-
-    <details class="diag-details" style="margin-top: 14px;">
-      <summary>Журнал отладки</summary>
-      <pre id="diagLog" class="diag-pre"></pre>
-      <button type="button" class="btn secondary" id="btnCopyDiag" style="margin-top: 8px;">Копировать лог</button>
-    </details>
-  </div>
-</div>
-</body>
+  </body>
 </html>

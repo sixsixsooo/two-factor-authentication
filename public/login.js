@@ -1,4 +1,4 @@
-/* global tf, mobilenet, knnClassifier, SurvLocalDB */
+/* global tf, mobilenet, knnClassifier, SurvAPI, SurvFacePipeline, SurvRfid */
 
 const diagLines = [];
 const MAX_DIAG = 80;
@@ -26,17 +26,24 @@ const btnCheckEmployee = document.getElementById('btnCheckEmployee');
 const employeeInfo = document.getElementById('employeeInfo');
 
 const statusBox = document.getElementById('statusBox');
-const gpsStatus = document.getElementById('gpsStatus');
-const gpsCoords = document.getElementById('gpsCoords');
-const btnRetryGps = document.getElementById('btnRetryGps');
 const btnLogin = document.getElementById('btnLogin');
 const statusAction = document.getElementById('statusAction');
+const panelSkud = document.getElementById('panelSkud');
+const panelPassword = document.getElementById('panelPassword');
+const btnShowPasswordLogin = document.getElementById('btnShowPasswordLogin');
+const btnBackSkud = document.getElementById('btnBackSkud');
+const btnPasswordRequest = document.getElementById('btnPasswordRequest');
+const btnLoginPassword = document.getElementById('btnLoginPassword');
+const passwordLoginInput = document.getElementById('passwordLogin');
+const passwordPasswordInput = document.getElementById('passwordPassword');
+const passwordStatus = document.getElementById('passwordStatus');
+const statusActionPassword = document.getElementById('statusActionPassword');
 
 /**
  * Распознавание не по «уверенности KNN» (при 1 классе она всегда ~1 для любого лица),
  * а по косинусной близости текущего кадра к среднему эмбеддингу класса.
  */
-const COSINE_MIN_SAME_PERSON = 0.84;
+const COSINE_MIN_SAME_PERSON = 0.78;
 /** Подряд кадров с хорошим совпадением (после снятия лишнего margin между классами). */
 const STABLE_FRAMES_NEEDED = 6;
 
@@ -49,6 +56,18 @@ let stableMatchFrames = 0;
 let lastCosineToExpected = 0;
 /** Для подсказки: кто «ближе всех» по эталону, если не вы */
 let lastFaceDebug = { bestId: '', bestSim: 0, secondId: '', secondSim: 0 };
+/** true если в последнем кадре BlazeFace не нашёл лицо (или crop пустой). */
+let lastFaceMissing = false;
+
+let requiresRfid = true;
+let rfidVerified = false;
+let scannedRfidCardId = null;
+let rfidReader = null;
+let expectedEmployeeRole = 'employee';
+
+const rfidBlock = document.getElementById('rfidBlock');
+const rfidLoginCapture = document.getElementById('rfidLoginCapture');
+const rfidLoginStatus = document.getElementById('rfidLoginStatus');
 
 /** После успешной проверки сотрудника в IndexedDB */
 let employeeVerified = false;
@@ -63,7 +82,13 @@ let isTraining = false;
 let facePipelineStarted = false;
 let facePipelinePromise = null;
 
-let gps = { lat: null, lon: null };
+/** После первого успешного распознавания лица вход не блокируется, если лицо ушло из кадра. */
+let faceConfirmedOnce = false;
+
+let loginMode = 'skud';
+let passwordRequestId = null;
+let passwordApproved = false;
+let passwordPollTimer = null;
 
 function setBox(el, text, kind) {
   if (!el) return;
@@ -80,6 +105,16 @@ function setStatusText() {
   }
   if (!classMeanEmbeddings || !classMeanEmbeddings[expectedEmployeeIdStr]) {
     predictionStatus.textContent = 'лицо: нет эталона для id ' + expectedEmployeeIdStr;
+    predictionStatus.className = 'tag bad';
+    return;
+  }
+  if (faceConfirmedOnce) {
+    predictionStatus.textContent = 'лицо: подтверждено — можно войти (держать лицо в кадре не нужно)';
+    predictionStatus.className = 'tag ok';
+    return;
+  }
+  if (lastFaceMissing) {
+    predictionStatus.textContent = 'лицо: нет лица в кадре (BlazeFace) — смотрите в камеру';
     predictionStatus.className = 'tag bad';
     return;
   }
@@ -139,124 +174,114 @@ function faceMatchesExpected() {
   );
 }
 
+function faceOkForLogin() {
+  return faceConfirmedOnce || faceMatchesExpected();
+}
+
+function rfidOkForLogin() {
+  return rfidVerified && !!scannedRfidCardId;
+}
+
 function maybeEnableLogin() {
-  const ok = faceMatchesExpected() && gps.lat !== null && gps.lon !== null;
-  btnLogin.disabled = !ok;
-}
-
-function geolocationErrorMessage(code) {
-  switch (code) {
-    case 1:
-      return 'доступ запрещён';
-    case 2:
-      return 'позиция недоступна';
-    case 3:
-      return 'таймаут';
-    default:
-      return 'ошибка';
-  }
-}
-
-async function startGps() {
-  diagLog('startGps()');
-  if (!navigator.geolocation) {
-    gpsStatus.textContent = 'GPS: не поддерживается';
-    gpsStatus.className = 'tag bad';
-    gpsCoords.textContent = 'Браузер не поддерживает Geolocation API.';
+  if (loginMode === 'password') {
+    if (btnLoginPassword) btnLoginPassword.disabled = !passwordApproved;
     return;
   }
-  gps.lat = null;
-  gps.lon = null;
-  gpsStatus.textContent = 'GPS: запрос…';
-  gpsStatus.className = 'tag';
-  gpsCoords.textContent =
-    'Разрешите доступ к местоположению. На не-localhost без HTTPS геолокация может быть недоступна.';
-
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      gps.lat = pos.coords.latitude;
-      gps.lon = pos.coords.longitude;
-      gpsStatus.textContent = 'GPS: ок';
-      gpsStatus.className = 'tag ok';
-      gpsCoords.textContent = `lat=${gps.lat.toFixed(6)}, lon=${gps.lon.toFixed(6)}`;
-      diagLog('GPS OK');
-      maybeEnableLogin();
-    },
-    (err) => {
-      const code = err && err.code;
-      gpsStatus.textContent = 'GPS: ' + geolocationErrorMessage(code);
-      gpsStatus.className = 'tag bad';
-      gpsCoords.textContent =
-        'Без сети браузер часто не получает точку. Нажмите «Последние координаты» или введите lat/lon вручную.';
-      diagLog('GPS error', err);
-      maybeEnableLogin();
-    },
-    {
-      enableHighAccuracy: false,
-      timeout: 30000,
-      /** Разрешить кэш браузера (часто даёт точку без сети, если недавно уже определялись). */
-      maximumAge: 300000
-    }
-  );
+  const ok = faceOkForLogin() && rfidOkForLogin();
+  if (btnLogin) btnLogin.disabled = !ok;
 }
 
-/**
- * Координаты из прошлого успешного входа (localStorage) — для работы без сети / без свежего GPS.
- */
-function applySavedGpsFromStorage() {
-  try {
-    const raw = localStorage.getItem('surv_last_gps');
-    if (!raw) {
-      gpsCoords.textContent = 'Сохранённых координат ещё нет — введите lat/lon вручную ниже.';
-      return false;
-    }
-    const j = JSON.parse(raw);
-    if (j.lat == null || j.lon == null) return false;
-    gps.lat = Number(j.lat);
-    gps.lon = Number(j.lon);
-    gpsStatus.textContent = 'GPS: сохранённые';
-    gpsStatus.className = 'tag ok';
-    gpsCoords.textContent = `lat=${gps.lat.toFixed(6)}, lon=${gps.lon.toFixed(6)} (из последнего входа, офлайн)`;
-    diagLog('GPS из surv_last_gps');
-    maybeEnableLogin();
-    return true;
-  } catch (e) {
-    diagLog('saved GPS', e);
-    return false;
-  }
+function setRfidLoginStatus(text, kind) {
+  if (!rfidLoginStatus) return;
+  rfidLoginStatus.textContent = text;
+  if (kind === 'ok') rfidLoginStatus.style.color = '#86efac';
+  else if (kind === 'bad') rfidLoginStatus.style.color = '#f87171';
+  else if (kind === 'warn') rfidLoginStatus.style.color = '#fbbf24';
+  else rfidLoginStatus.style.color = '#9ca3af';
 }
 
-function applyManualGps() {
-  const latEl = document.getElementById('manualLat');
-  const lonEl = document.getElementById('manualLon');
-  const lat = latEl ? parseFloat(latEl.value) : NaN;
-  const lon = lonEl ? parseFloat(lonEl.value) : NaN;
-  if (Number.isNaN(lat) || Number.isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
-    gpsCoords.textContent =
-      'Некорректные координаты. lat: -90…90, lon: -180…180 (можно с точкой: 47.21).';
-    return;
+function setupLoginRfidReader() {
+  if (!window.SurvRfid || !rfidLoginCapture || rfidReader) return;
+  rfidReader = SurvRfid.create({
+    onScan: function (cardId) {
+      scannedRfidCardId = cardId;
+      if (rfidLoginCapture) rfidLoginCapture.value = '';
+      rfidVerified = true;
+      setRfidLoginStatus('Пропуск: считан', 'ok');
+      diagLog('RFID: пропуск считан (вход)');
+      maybeEnableLogin();
+    }
+  });
+  rfidReader.attach(rfidLoginCapture);
+  rfidLoginCapture.addEventListener('focus', function () {
+    rfidReader.focus();
+  });
+}
+
+function enableRfidBlock() {
+  requiresRfid = true;
+  rfidVerified = false;
+  scannedRfidCardId = null;
+  if (rfidLoginCapture) rfidLoginCapture.value = '';
+  if (rfidBlock) {
+    rfidBlock.style.opacity = '1';
+    rfidBlock.style.pointerEvents = 'auto';
   }
-  gps.lat = lat;
-  gps.lon = lon;
-  gpsStatus.textContent = 'GPS: вручную';
-  gpsStatus.className = 'tag ok';
-  gpsCoords.textContent = `lat=${gps.lat.toFixed(6)}, lon=${gps.lon.toFixed(6)} (ввод вручную, офлайн)`;
-  try {
-    localStorage.setItem(
-      'surv_last_gps',
-      JSON.stringify({ lat: gps.lat, lon: gps.lon, at: new Date().toISOString() })
-    );
-  } catch (_) {}
-  diagLog('GPS вручную');
+  setRfidLoginStatus('Пропуск: приложите карту к считывателю', 'warn');
+  setupLoginRfidReader();
+  if (rfidReader) rfidReader.focus();
   maybeEnableLogin();
 }
 
-if (btnRetryGps) {
-  btnRetryGps.addEventListener('click', () => startGps());
+function showPasswordPanel(show) {
+  loginMode = show ? 'password' : 'skud';
+  if (panelPassword) panelPassword.style.display = show ? 'block' : 'none';
+  if (panelSkud) panelSkud.style.display = show ? 'none' : '';
+  if (btnShowPasswordLogin) btnShowPasswordLogin.style.display = show ? 'none' : '';
+  if (btnBackSkud) btnBackSkud.style.display = show ? '' : 'none';
+  maybeEnableLogin();
 }
 
-document.getElementById('btnUseSavedGps')?.addEventListener('click', () => applySavedGpsFromStorage());
-document.getElementById('btnApplyManualGps')?.addEventListener('click', applyManualGps);
+function stopPasswordPoll() {
+  if (passwordPollTimer) {
+    clearInterval(passwordPollTimer);
+    passwordPollTimer = null;
+  }
+}
+
+async function pollPasswordRequest() {
+  if (!passwordRequestId || !window.SurvAPI) return;
+  try {
+    const st = await SurvAPI.getPasswordLoginRequest(passwordRequestId);
+    if (st.status === 'approved') {
+      passwordApproved = true;
+      if (passwordStatus) {
+        passwordStatus.textContent = 'Бухгалтер подтвердил вход. Нажмите «Войти».';
+        passwordStatus.style.color = '#86efac';
+      }
+      stopPasswordPoll();
+      maybeEnableLogin();
+    } else if (st.status === 'rejected') {
+      passwordApproved = false;
+      if (passwordStatus) {
+        passwordStatus.textContent = 'Бухгалтер отклонил запрос.';
+        passwordStatus.style.color = '#f87171';
+      }
+      stopPasswordPoll();
+    } else if (st.status === 'expired') {
+      passwordApproved = false;
+      if (passwordStatus) {
+        passwordStatus.textContent = 'Время запроса истекло. Отправьте снова.';
+        passwordStatus.style.color = '#fbbf24';
+      }
+      stopPasswordPoll();
+    } else if (passwordStatus) {
+      passwordStatus.textContent = 'Ожидание подтверждения бухгалтером…';
+    }
+  } catch (e) {
+    diagLog('poll password', e);
+  }
+}
 
 function withTimeout(promise, ms, label) {
   return Promise.race([
@@ -301,6 +326,11 @@ async function setupModels() {
     120000,
     'MobileNet'
   );
+  if (!window.SurvFacePipeline) {
+    throw new Error('Не загружен face-pipeline.js');
+  }
+  modelsStatus.textContent = 'модели: BlazeFace…';
+  await withTimeout(SurvFacePipeline.ensureBlazeFace(), 120000, 'BlazeFace');
   modelsStatus.textContent = 'модели: готовы';
 }
 
@@ -317,22 +347,14 @@ async function setupWebcam() {
   await webcam.play();
 }
 
-function getActivation() {
-  return tf.tidy(() => {
-    const img = tf.browser.fromPixels(webcam);
-    return net.infer(img, 'conv_preds');
-  });
-}
-
-function dotProduct(a, b) {
-  let s = 0;
-  const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i++) s += a[i] * b[i];
-  return s;
-}
-
 async function getNormalizedActivationVector() {
-  const activation = getActivation();
+  lastFaceMissing = false;
+  if (!window.SurvFacePipeline || !net || !webcam) return null;
+  const activation = await SurvFacePipeline.getFaceActivation(webcam, net, false);
+  if (!activation) {
+    lastFaceMissing = true;
+    return null;
+  }
   const flat = tf.tidy(() => tf.reshape(activation, [-1]));
   const data = await flat.data();
   flat.dispose();
@@ -343,6 +365,13 @@ async function getNormalizedActivationVector() {
   const out = new Float32Array(data.length);
   for (let i = 0; i < data.length; i++) out[i] = data[i] / norm;
   return out;
+}
+
+function dotProduct(a, b) {
+  let s = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) s += a[i] * b[i];
+  return s;
 }
 
 async function rebuildClassMeans() {
@@ -388,16 +417,16 @@ async function importDatasetFromJsonObject(obj) {
   await rebuildClassMeans();
 }
 
-async function tryLoadDatasetFromIndexedDB() {
-  if (!window.SurvLocalDB) return false;
+async function tryLoadDatasetFromServer() {
+  if (!window.SurvAPI) return false;
   try {
-    const ds = await SurvLocalDB.loadKnnDataset();
-    if (!ds || typeof ds !== 'object' || Object.keys(ds).length === 0) return false;
-    await importDatasetFromJsonObject(ds);
-    diagLog('KNN загружен из IndexedDB');
+    const { dataset } = await SurvAPI.loadKnnDataset();
+    if (!dataset || typeof dataset !== 'object' || Object.keys(dataset).length === 0) return false;
+    await importDatasetFromJsonObject(dataset);
+    diagLog('KNN загружен с сервера (MySQL)');
     return true;
   } catch (e) {
-    diagLog('IndexedDB KNN', e);
+    diagLog('KNN server load', e);
     return false;
   }
 }
@@ -428,6 +457,18 @@ async function predictLoop() {
       classMeanEmbeddings
     ) {
       const vec = await getNormalizedActivationVector();
+      if (!vec) {
+        if (!faceConfirmedOnce) {
+          stableMatchFrames = 0;
+          recognizedEmployeeId = null;
+          recognizedConfidence = 0;
+        }
+        lastCosineToExpected = 0;
+        lastFaceDebug = { bestId: '', bestSim: 0, secondId: '', secondSim: 0 };
+        setStatusText();
+        maybeEnableLogin();
+        return;
+      }
       const expId = expectedEmployeeIdStr;
       const sims = {};
       for (const label of Object.keys(classMeanEmbeddings)) {
@@ -460,8 +501,12 @@ async function predictLoop() {
         if (stableMatchFrames >= STABLE_FRAMES_NEEDED) {
           recognizedEmployeeId = expId;
           recognizedConfidence = simExp;
+          if (!faceConfirmedOnce) {
+            faceConfirmedOnce = true;
+            diagLog('лицо подтверждено (зафиксировано)');
+          }
         }
-      } else {
+      } else if (!faceConfirmedOnce) {
         stableMatchFrames = 0;
         recognizedEmployeeId = null;
         recognizedConfidence = 0;
@@ -482,11 +527,20 @@ function resetVerificationUi() {
   employeeVerified = false;
   expectedEmployeeIdStr = null;
   verifiedEmployeeName = '';
+  faceConfirmedOnce = false;
   recognizedEmployeeId = null;
   recognizedConfidence = 0;
   stableMatchFrames = 0;
   lastCosineToExpected = 0;
   lastFaceDebug = { bestId: '', bestSim: 0, secondId: '', secondSim: 0 };
+  lastFaceMissing = false;
+  rfidVerified = false;
+  scannedRfidCardId = null;
+  requiresRfid = true;
+  if (rfidBlock) {
+    rfidBlock.style.opacity = '0.5';
+    rfidBlock.style.pointerEvents = 'none';
+  }
   employeeInfo.textContent = '';
   employeeInfo.style.color = '';
   faceBlock.style.opacity = '0.5';
@@ -498,6 +552,11 @@ function resetVerificationUi() {
 }
 
 function fullResetFacePipeline() {
+  try {
+    if (window.SurvFacePipeline && typeof SurvFacePipeline.dispose === 'function') {
+      SurvFacePipeline.dispose();
+    }
+  } catch (_) {}
   try {
     if (webcam && webcam.srcObject) {
       webcam.srcObject.getTracks().forEach((t) => t.stop());
@@ -527,7 +586,7 @@ async function initFacePipeline() {
     await initTfBackend();
     await setupModels();
     await camPromise;
-    let loaded = await tryLoadDatasetFromIndexedDB();
+    let loaded = await tryLoadDatasetFromServer();
     if (!loaded) await tryLoadDatasetFromLocalStorage();
     updateDatasetStatus();
     if (classifier.getNumExamples() === 0) {
@@ -556,18 +615,18 @@ async function onCheckEmployee() {
   statusBox.style.display = 'none';
 
   try {
-    if (!window.SurvLocalDB) {
-      throw new Error('Не загружен local-db.js');
+    if (!window.SurvAPI) {
+      throw new Error('Не загружен surv-api.js');
     }
-    const data = await SurvLocalDB.getEmployee(id);
-    diagLog('IndexedDB getEmployee(' + id + ') → ' + (data ? 'ok' : 'null'));
+    const data = await SurvAPI.getEmployee(id);
+    diagLog('GET /api/employee/' + id + ' → ' + (data ? 'ok' : 'null'));
 
     if (!data) {
       employeeVerified = false;
       expectedEmployeeIdStr = null;
-      employeeInfo.textContent = 'Сотрудник с таким employeeId не найден в локальной базе (IndexedDB).';
+      employeeInfo.textContent = 'Сотрудник с таким employeeId не найден в базе на сервере.';
       employeeInfo.style.color = '#f87171';
-      setBox(statusBox, 'Сначала зарегистрируйте сотрудника на странице регистрации (в этом же браузере).', 'error');
+      setBox(statusBox, 'Сначала зарегистрируйте сотрудника на странице регистрации.', 'error');
       faceBlock.style.opacity = '0.5';
       faceBlock.style.pointerEvents = 'none';
       maybeEnableLogin();
@@ -577,10 +636,20 @@ async function onCheckEmployee() {
     employeeVerified = true;
     expectedEmployeeIdStr = String(data.id);
     verifiedEmployeeName = data.name || '';
-    employeeInfo.textContent = 'Найден локально: ' + verifiedEmployeeName + ' (id ' + data.id + ')';
+    expectedEmployeeRole = data.role || 'employee';
+    employeeInfo.textContent =
+      'Найден: ' +
+      verifiedEmployeeName +
+      ' (id ' +
+      data.id +
+      ', ' +
+      (data.role === 'accountant' ? 'бухгалтер' : 'сотрудник') +
+      ')';
     employeeInfo.style.color = '#93c5fd';
     faceBlock.style.opacity = '1';
     faceBlock.style.pointerEvents = 'auto';
+
+    enableRfidBlock();
 
     modelsStatus.textContent = 'модели: загрузка…';
     await initFacePipeline();
@@ -606,14 +675,25 @@ employeeIdInput.addEventListener('input', () => {
   }
 });
 
+function finishLoginRedirect(loginData) {
+  const role = loginData.role || 'employee';
+  localStorage.setItem('surv_employee_id', String(loginData.employeeId));
+  localStorage.setItem('surv_role', role);
+  localStorage.removeItem('surv_local_session_start');
+  localStorage.removeItem('surv_local_login');
+  setTimeout(() => {
+    window.location.href = role === 'accountant' ? '/accountant.html' : '/dashboard.html';
+  }, 400);
+}
+
 btnLogin.addEventListener('click', async () => {
   const id = expectedEmployeeIdStr ? parseInt(expectedEmployeeIdStr, 10) : NaN;
-  if (!id || !faceMatchesExpected()) {
-    setBox(statusAction, 'Не подтверждены лицо или GPS.', 'error');
+  if (!id || !faceOkForLogin()) {
+    setBox(statusAction, 'Подтвердите лицо и приложите RFID-карту.', 'error');
     return;
   }
-  if (gps.lat === null || gps.lon === null) {
-    setBox(statusAction, 'Нет GPS.', 'error');
+  if (!rfidOkForLogin()) {
+    setBox(statusAction, 'Приложите RFID-карту к считывателю.', 'error');
     return;
   }
 
@@ -621,29 +701,75 @@ btnLogin.addEventListener('click', async () => {
     btnLogin.disabled = true;
     statusAction.style.display = 'block';
     statusAction.className = 'status info';
-    statusAction.textContent = 'Вход (локально)…';
+    statusAction.textContent = 'Вход на сервер…';
 
-    /** Сессия только в браузере — без POST на сервер. */
-    localStorage.setItem('surv_employee_id', String(id));
-    localStorage.setItem('surv_local_session_start', new Date().toISOString());
-    localStorage.setItem('surv_local_login', '1');
-    localStorage.setItem(
-      'surv_last_gps',
-      JSON.stringify({ lat: gps.lat, lon: gps.lon, at: new Date().toISOString() })
-    );
-
+    const loginData = await SurvAPI.login(id, scannedRfidCardId);
     statusAction.className = 'status success';
-    statusAction.textContent = 'Вход выполнен. Переход в кабинет…';
-    setTimeout(() => {
-      window.location.href = '/dashboard.html';
-    }, 400);
+    statusAction.textContent = 'Вход выполнен (' + (loginData.name || '') + '). Переход…';
+    finishLoginRedirect(loginData);
   } catch (e) {
     setBox(statusAction, e && e.message ? e.message : String(e), 'error');
   } finally {
-    btnLogin.disabled = false;
     maybeEnableLogin();
   }
 });
+
+if (btnShowPasswordLogin) {
+  btnShowPasswordLogin.addEventListener('click', () => showPasswordPanel(true));
+}
+if (btnBackSkud) {
+  btnBackSkud.addEventListener('click', () => {
+    stopPasswordPoll();
+    showPasswordPanel(false);
+  });
+}
+
+if (btnPasswordRequest) {
+  btnPasswordRequest.addEventListener('click', async () => {
+    const login = passwordLoginInput ? passwordLoginInput.value : '';
+    const password = passwordPasswordInput ? passwordPasswordInput.value : '';
+    passwordApproved = false;
+    passwordRequestId = null;
+    stopPasswordPoll();
+    if (btnLoginPassword) btnLoginPassword.disabled = true;
+    try {
+      btnPasswordRequest.disabled = true;
+      const data = await SurvAPI.requestPasswordLogin(login, password);
+      passwordRequestId = data.requestId;
+      if (passwordStatus) {
+        passwordStatus.textContent = data.message || 'Запрос отправлен.';
+        passwordStatus.style.color = '#93c5fd';
+      }
+      passwordPollTimer = setInterval(pollPasswordRequest, 2500);
+      pollPasswordRequest();
+    } catch (e) {
+      if (passwordStatus) {
+        passwordStatus.textContent = e && e.message ? e.message : String(e);
+        passwordStatus.style.color = '#f87171';
+      }
+    } finally {
+      btnPasswordRequest.disabled = false;
+    }
+  });
+}
+
+if (btnLoginPassword) {
+  btnLoginPassword.addEventListener('click', async () => {
+    if (!passwordApproved || !passwordRequestId) return;
+    try {
+      btnLoginPassword.disabled = true;
+      setBox(statusActionPassword, 'Вход…', 'info');
+      const loginData = await SurvAPI.loginWithPasswordApproval(passwordRequestId);
+      setBox(statusActionPassword, 'Вход выполнен. Переход…', 'success');
+      stopPasswordPoll();
+      finishLoginRedirect(loginData);
+    } catch (e) {
+      setBox(statusActionPassword, e && e.message ? e.message : String(e), 'error');
+    } finally {
+      maybeEnableLogin();
+    }
+  });
+}
 
 const btnCopyDiag = document.getElementById('btnCopyDiag');
 if (btnCopyDiag) {
@@ -671,14 +797,13 @@ async function boot() {
     setBox(statusBox, 'Откройте http://localhost:3000/login.html', 'error');
     return;
   }
-  if (!window.SurvLocalDB) {
+  if (!window.SurvAPI) {
     modelsStatus.textContent = 'ошибка';
-    setBox(statusBox, 'Подключите local-db.js перед login.js', 'error');
+    setBox(statusBox, 'Подключите surv-api.js перед login.js', 'error');
     return;
   }
 
   modelsStatus.textContent = 'модели: после проверки employeeId';
-  startGps();
 }
 
 window.addEventListener('DOMContentLoaded', boot);

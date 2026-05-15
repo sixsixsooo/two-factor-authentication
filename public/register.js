@@ -1,4 +1,4 @@
-/* global tf, mobilenet, knnClassifier, SurvLocalDB */
+/* global tf, mobilenet, knnClassifier, SurvAPI, SurvFacePipeline, SurvRfid */
 
 const diagLines = [];
 function diagLog(msg, err) {
@@ -29,6 +29,12 @@ const TRAIN_EVERY_MS = 90;
 let net = null;
 let classifier = null;
 let isRunning = false;
+let capturedRfidCardId = null;
+let rfidReader = null;
+
+const rfidCaptureInput = document.getElementById('rfidCapture');
+const rfidStatusEl = document.getElementById('rfidStatus');
+const roleSelect = document.getElementById('role');
 
 function showStatus(type, text) {
   statusBox.style.display = 'block';
@@ -78,6 +84,11 @@ async function setupModels() {
     120000,
     'MobileNet'
   );
+  if (!window.SurvFacePipeline) {
+    throw new Error('Не загружен face-pipeline.js');
+  }
+  modelsStatus.textContent = 'модели: BlazeFace…';
+  await withTimeout(SurvFacePipeline.ensureBlazeFace(), 120000, 'BlazeFace');
   modelsStatus.textContent = 'модели: готовы';
 }
 
@@ -94,11 +105,9 @@ async function setupWebcam() {
   await webcam.play();
 }
 
-function getActivation() {
-  return tf.tidy(() => {
-    const img = tf.browser.fromPixels(webcam);
-    return net.infer(img, 'conv_preds');
-  });
+async function getActivationFromFace() {
+  if (!window.SurvFacePipeline || !net || !webcam) return null;
+  return SurvFacePipeline.getFaceActivation(webcam, net, false);
 }
 
 function updateDatasetStatus() {
@@ -132,16 +141,16 @@ async function importDatasetFromJsonObject(obj) {
   updateDatasetStatus();
 }
 
-async function tryLoadDatasetFromIndexedDB() {
-  if (!window.SurvLocalDB) return false;
+async function tryLoadDatasetFromServer() {
+  if (!window.SurvAPI) return false;
   try {
-    const ds = await SurvLocalDB.loadKnnDataset();
-    if (!ds || typeof ds !== 'object' || Object.keys(ds).length === 0) return false;
-    await importDatasetFromJsonObject(ds);
-    diagLog('KNN загружен из IndexedDB (локально)');
+    const { dataset } = await SurvAPI.loadKnnDataset();
+    if (!dataset || typeof dataset !== 'object' || Object.keys(dataset).length === 0) return false;
+    await importDatasetFromJsonObject(dataset);
+    diagLog('KNN загружен с сервера (MySQL)');
     return true;
   } catch (e) {
-    diagLog('IndexedDB load', e);
+    diagLog('KNN load server', e);
     return false;
   }
 }
@@ -157,27 +166,44 @@ async function buildKnnExportObject() {
   return obj;
 }
 
-async function saveKnnToIndexedDB() {
+async function saveKnnToServer() {
   if (!classifier || classifier.getNumExamples() === 0) {
     throw new Error('Нет данных KNN для сохранения');
   }
-  if (!window.SurvLocalDB) {
-    throw new Error('SurvLocalDB не загружен (local-db.js)');
+  if (!window.SurvAPI) {
+    throw new Error('SurvAPI не загружен (surv-api.js)');
   }
   const obj = await buildKnnExportObject();
-  await SurvLocalDB.saveKnnDataset(obj);
-  diagLog('KNN сохранён в IndexedDB (локально на этом ПК)');
+  let merged = { ...obj };
+  try {
+    const { dataset } = await SurvAPI.loadKnnDataset();
+    if (dataset && typeof dataset === 'object') {
+      merged = { ...dataset, ...obj };
+    }
+  } catch (e) {
+    diagLog('KNN merge load', e);
+  }
+  await SurvAPI.saveKnnDataset(merged);
+  diagLog('KNN сохранён на сервере (MySQL)');
 }
 
 async function trainExamplesForLabel(labelStr) {
-  for (let i = 0; i < TRAIN_STEPS; i++) {
-    const activation = getActivation();
+  let i = 0;
+  while (i < TRAIN_STEPS) {
+    const activation = await getActivationFromFace();
+    if (!activation) {
+      setFaceBox(`Лицо не найдено (BlazeFace). Уже записано ${i}/${TRAIN_STEPS} — смотрите в камеру`, 'info');
+      predictionStatus.textContent = 'ожидание лица…';
+      await new Promise((r) => setTimeout(r, TRAIN_EVERY_MS));
+      continue;
+    }
     classifier.addExample(activation, labelStr);
     activation.dispose();
     if (i % 5 === 0) {
       setFaceBox(`Обучение лица: ${i + 1}/${TRAIN_STEPS}`, 'info');
       predictionStatus.textContent = 'кадры: ' + (i + 1) + '/' + TRAIN_STEPS;
     }
+    i += 1;
     await new Promise((r) => setTimeout(r, TRAIN_EVERY_MS));
   }
   updateDatasetStatus();
@@ -185,47 +211,79 @@ async function trainExamplesForLabel(labelStr) {
   predictionStatus.className = 'tag ok';
 }
 
-/**
- * Карточка сотрудника + KNN только в IndexedDB (без API сервера).
- */
+/** Карточка сотрудника и KNN — на сервере (MySQL). */
 async function registerFull() {
   if (isRunning || !net || !classifier) return;
 
-  if (!window.SurvLocalDB) {
-    showStatus('error', 'Не загружен local-db.js');
+  if (!window.SurvAPI) {
+    showStatus('error', 'Не загружен surv-api.js');
     return;
   }
 
   const name = document.getElementById('name').value.trim();
+  const login = document.getElementById('loginName')?.value.trim() || '';
+  const email = document.getElementById('email')?.value.trim() || '';
+  const password = document.getElementById('password')?.value || '';
   const schedule = document.getElementById('schedule').value;
   const rate = parseFloat(document.getElementById('rate').value);
+  const role = roleSelect ? roleSelect.value : 'employee';
+  const workStart = document.getElementById('workStart')?.value || '09:00';
+  const workStartTime = workStart.length === 5 ? workStart + ':00' : workStart;
+
   if (!name || !schedule || Number.isNaN(rate) || rate < 0) {
     showStatus('error', 'Заполните имя, график и ставку (число ≥ 0).');
+    return;
+  }
+  if (!login || login.length < 3) {
+    showStatus('error', 'Логин: минимум 3 символа.');
+    return;
+  }
+  if (!password || password.length < 6) {
+    showStatus('error', 'Пароль: минимум 6 символов.');
+    return;
+  }
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    showStatus('error', 'Укажите корректный e-mail.');
+    return;
+  }
+  if (!capturedRfidCardId) {
+    showStatus('error', 'Приложите RFID-карту к считывателю.');
     return;
   }
 
   isRunning = true;
   btnRegisterFull.disabled = true;
-  showStatus('info', 'Сохранение в локальную базу (IndexedDB)…');
+  showStatus('info', 'Сохранение на сервер (MySQL)…');
   setFaceBox('Запись карточки сотрудника…', 'info');
 
   try {
-    const employeeId = await SurvLocalDB.addEmployee({ name, schedule, rate });
+    const reg = await SurvAPI.registerEmployee({
+      name,
+      login,
+      password,
+      email,
+      schedule,
+      rate,
+      role,
+      rfidCardId: capturedRfidCardId,
+      workStartTime
+    });
+    const employeeId = reg.employeeId;
     const labelStr = String(employeeId);
     localStorage.setItem('surv_last_employee_id', labelStr);
 
-    diagLog('IndexedDB addEmployee → id=' + employeeId);
-    showStatus('success', `Карточка сохранена локально. employeeId = ${employeeId}. Обучение лица…`);
+    diagLog('POST /register → id=' + employeeId);
+    showStatus('success', `Карточка в БД. employeeId = ${employeeId}. Обучение лица…`);
 
     setFaceBox('Смотрите в камеру — обучение KNN…', 'info');
     await trainExamplesForLabel(labelStr);
 
-    setFaceBox('Сохранение признаков лица в IndexedDB…', 'info');
-    await saveKnnToIndexedDB();
+    setFaceBox('Сохранение признаков лица на сервер…', 'info');
+    await saveKnnToServer();
 
     showStatus(
       'success',
-      `Готово. Сотрудник №${employeeId} и лицо сохранены на этом компьютере (IndexedDB). Откройте «Вход» и введите тот же id.`
+      `Готово. Сотрудник №${employeeId} и лицо в MySQL на сервере. Откройте «Вход» и введите id ${employeeId}.`
     );
     setFaceBox('Регистрация завершена.', 'ok');
   } catch (e) {
@@ -238,8 +296,8 @@ async function registerFull() {
     showStatus(
       'error',
       msg +
-        (String(msg).toLowerCase().includes('indexeddb') || String(msg).toLowerCase().includes('quota')
-          ? ' Попробуйте другой браузер или отключите режим инкогнито.'
+        (String(msg).toLowerCase().includes('mysql') || String(msg).toLowerCase().includes('connect')
+          ? ' Проверьте, что MySQL запущен и сервер node запущен без ошибок БД.'
           : '')
     );
     setFaceBox(msg, 'error');
@@ -265,8 +323,8 @@ async function main() {
     showStatus('error', 'Откройте http://localhost:3000/register.html');
     return;
   }
-  if (!window.SurvLocalDB) {
-    showStatus('error', 'Подключите local-db.js перед register.js');
+  if (!window.SurvAPI) {
+    showStatus('error', 'Подключите surv-api.js перед register.js');
     return;
   }
 
@@ -285,17 +343,49 @@ async function main() {
     await setupModels();
     await camPromise;
 
-    await tryLoadDatasetFromIndexedDB();
+    await tryLoadDatasetFromServer();
 
     updateDatasetStatus();
     btnRegisterFull.disabled = false;
-    diagLog('Готово: TF + камера + IndexedDB');
+    setupRfidCapture();
+    diagLog('Готово: TF + камера + MySQL API');
   } catch (e) {
     console.error(e);
     diagLog('main', e);
     modelsStatus.textContent = 'ошибка';
     showStatus('error', e && e.message ? e.message : String(e));
   }
+}
+
+function updateRfidStatusUi() {
+  if (!rfidStatusEl) return;
+  if (capturedRfidCardId) {
+    rfidStatusEl.textContent = 'Пропуск: считан и будет привязан к сотруднику';
+    rfidStatusEl.style.color = '#86efac';
+  } else {
+    rfidStatusEl.textContent = 'Пропуск: не считан — кликните в поле и приложите карту';
+    rfidStatusEl.style.color = '#fbbf24';
+  }
+}
+
+function setupRfidCapture() {
+  if (!window.SurvRfid || !rfidCaptureInput) return;
+  rfidReader = SurvRfid.create({
+    onScan: function (cardId) {
+      capturedRfidCardId = cardId;
+      rfidCaptureInput.value = '';
+      updateRfidStatusUi();
+      diagLog('RFID: пропуск считан (регистрация)');
+    }
+  });
+  rfidReader.attach(rfidCaptureInput);
+  rfidCaptureInput.addEventListener('focus', function () {
+    rfidReader.focus();
+  });
+  if (roleSelect) {
+    roleSelect.addEventListener('change', updateRfidStatusUi);
+  }
+  updateRfidStatusUi();
 }
 
 window.addEventListener('DOMContentLoaded', main);
